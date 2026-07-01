@@ -1,0 +1,23 @@
+.git
+.github
+
+# Build output
+bin/
+out/
+
+# Secrets - must never enter Docker build context
+*.p8
+*service-account*.json
+*serviceAccount*.json
+*firebase-adminsdk*.json
+credentials.json
+key.json
+.env
+.env.*
+
+# Test / coverage artifacts
+*.out
+coverage.*
+
+# Local OS/editor noise
+.DS_Store
