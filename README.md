@@ -27,6 +27,20 @@ Delivery requests are idempotent. This allows a Silo Server to retry safely
 without intentionally sending the same push more than once, including when an
 upstream response is uncertain.
 
+## Infrastructure
+
+The relay runs on [Cloudflare Workers](https://developers.cloudflare.com/workers/)
+instead of a traditional application server. Requests enter Cloudflare's global
+network close to the sending Silo Server, and the service can scale without a
+central server or database becoming a bottleneck. Cloudflare also provides
+automatic DDoS protection, while application-level rate limits add safeguards
+for registrations, deployments, and individual devices.
+
+The relay's signing keys and APNs credentials are stored as encrypted Worker
+secrets, separate from the source code and deployment configuration. The
+serverless design also means there is no public origin server, operating system,
+or long-running database for the Silo team to expose or maintain.
+
 ## Privacy by design
 
 The relay is intentionally unable to accept arbitrary notification payloads.
