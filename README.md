@@ -11,8 +11,9 @@ branch.
 - The edge Worker strictly validates requests and verifies Ed25519 capability
   JWTs without an account lookup.
 - One SQLite-backed `DeploymentObject` per deployment owns credential
-  generation/revocation, durable daily quota, and the idempotency state
-  machine.
+  generation/revocation and the idempotency state machine.
+- Cloudflare Rate Limiting bindings provide the abuse backstops; the relay does
+  not impose usage quotas or persist rate-limit counters itself.
 - A singleton `ProviderTokenObject` is the only component that signs APNs
   provider JWTs. Deployment objects cache its result in memory.
 - No device token, notification content, raw capability, user identity, or
@@ -48,18 +49,25 @@ they signed have expired.
 
 `APNS_PRIVATE_KEY_PEM` accepts the existing Apple `.p8` PKCS#8 PEM contents.
 
-Production secrets are uploaded with `wrangler secret put <NAME>`. Configure a
-Cloudflare WAF rate-limit rule for `POST /v1/deployments/register` before
-directing public traffic at the Worker.
+Production secrets are uploaded with `wrangler secret put <NAME>`.
 
-Send and credential-rotation requests, including idempotent replays, share a
-per-deployment rate bucket so stored-response lookups cannot be used to overload
-a Durable Object. New sends also consume a durable daily quota. Device-token
-rate limits are intentionally scoped to one deployment: making them global
-would correlate a device across independent self-hosted servers and would let
-one hostile server starve another server's notifications. Registration
-therefore relies on the WAF rule above, while deployment and quota rejections
-should be monitored from Worker observability.
+Cloudflare Rate Limiting bindings enforce deliberately generous abuse ceilings:
+
+- all API writes: 2,000 requests per 10 seconds per source IP;
+- deployment registration: 10 per minute per source IP and 100 per minute per
+  Cloudflare location;
+- authenticated deployment traffic: 1,000 requests per 10 seconds per opaque
+  deployment ID; and
+- Apple delivery traffic: 30 requests per minute per deployment and hashed
+  device token.
+
+These counters are permissive and local to a Cloudflare location, so they are
+abuse backstops rather than accounting quotas. Device-token limits remain scoped
+to a deployment: a global token key would correlate a device across independent
+self-hosted servers and let one hostile server starve another server's
+notifications. Rate-limit denials and check failures emit structured events for
+Worker observability. Binding failures degrade open so a control-plane problem
+does not stop push delivery.
 
 ## Deployment
 
@@ -93,7 +101,8 @@ deployments.
 - Durable Object alarms are scheduled only while idempotency or rotation state
   exists. Expirations are coalesced into hourly buckets, cleanup drains bounded
   batches, and an object stops scheduling alarms once its transient state is
-  gone. Historical quota rows are removed on the next new delivery.
+  gone. The obsolete `daily_quota` table is removed when an existing deployment
+  object next starts under this Worker version.
 - Administrative revocations emit a structured audit event containing only the
   request ID and opaque deployment ID.
 - Test provider changes on Cloudflare itself; local `workerd` APNs behavior is

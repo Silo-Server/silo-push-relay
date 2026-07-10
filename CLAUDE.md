@@ -17,8 +17,10 @@ pnpm run deploy
 
 - `src/index.ts` and `src/config.ts` own the public HTTP surface and capability
   authentication.
-- `DeploymentObject` owns per-deployment rotation, revocation, rate limits,
-  quota, and fail-closed idempotency in Durable Object SQLite.
+- Cloudflare Rate Limiting bindings own ingress, registration, deployment, and
+  per-device abuse throttling; there is no daily usage quota.
+- `DeploymentObject` owns per-deployment rotation, revocation, and fail-closed
+  idempotency in Durable Object SQLite.
 - `ProviderTokenObject` signs and caches APNs provider JWTs.
 - `src/apns.ts` builds fixed content-private payloads and maps APNs responses.
 - Production is deployed at `push.siloserver.org`; `workers.dev` and preview

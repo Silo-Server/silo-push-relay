@@ -26,14 +26,51 @@
     "APNS_SANDBOX_URL": "https://api.sandbox.push.apple.com",
     "APNS_EXPIRATION_SECONDS": "900",
     "APNS_TIMEOUT_MS": "10000",
-    "DAILY_PUSH_LIMIT": "50000",
-    "ACCOUNT_RATE_PER_SECOND": "10",
-    "ACCOUNT_RATE_BURST": "20",
-    "TOKEN_RATE_PER_SECOND": "0.3333333333",
-    "TOKEN_RATE_BURST": "1",
     "IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS": "60",
     "IDEMPOTENCY_RETENTION_SECONDS": "86400"
   },
+  "ratelimits": [
+    {
+      "name": "INGRESS_RATE_LIMITER",
+      "namespace_id": "2375688658",
+      "simple": {
+        "limit": 2000,
+        "period": 10
+      }
+    },
+    {
+      "name": "REGISTRATION_IP_RATE_LIMITER",
+      "namespace_id": "2372244772",
+      "simple": {
+        "limit": 10,
+        "period": 60
+      }
+    },
+    {
+      "name": "REGISTRATION_LOCATION_RATE_LIMITER",
+      "namespace_id": "2339464169",
+      "simple": {
+        "limit": 100,
+        "period": 60
+      }
+    },
+    {
+      "name": "DEPLOYMENT_RATE_LIMITER",
+      "namespace_id": "1890095847",
+      "simple": {
+        "limit": 1000,
+        "period": 10
+      }
+    },
+    {
+      "name": "DEVICE_RATE_LIMITER",
+      "namespace_id": "3368630688",
+      "simple": {
+        "limit": 30,
+        "period": 60
+      }
+    }
+  ],
   "secrets": {
     "required": [
       "CAPABILITY_SIGNING_PRIVATE_KEY_PEM",

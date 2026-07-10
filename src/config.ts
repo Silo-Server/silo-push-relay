@@ -25,11 +25,6 @@ export function configurationError(env: Env): string | undefined {
     numberSetting(env.CAPABILITY_RENEW_GRACE_SECONDS, "CAPABILITY_RENEW_GRACE_SECONDS", 0);
     numberSetting(env.APNS_EXPIRATION_SECONDS, "APNS_EXPIRATION_SECONDS", 1);
     numberSetting(env.APNS_TIMEOUT_MS, "APNS_TIMEOUT_MS", 1);
-    numberSetting(env.DAILY_PUSH_LIMIT, "DAILY_PUSH_LIMIT", 1);
-    numberSetting(env.ACCOUNT_RATE_PER_SECOND, "ACCOUNT_RATE_PER_SECOND", 0.000_001);
-    numberSetting(env.ACCOUNT_RATE_BURST, "ACCOUNT_RATE_BURST", 1);
-    numberSetting(env.TOKEN_RATE_PER_SECOND, "TOKEN_RATE_PER_SECOND", 0.000_001);
-    numberSetting(env.TOKEN_RATE_BURST, "TOKEN_RATE_BURST", 1);
     numberSetting(
       env.IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS,
       "IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS",

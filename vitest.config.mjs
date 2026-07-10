@@ -27,11 +27,6 @@ export default defineConfig({
           APNS_KEY_ID: "TESTKEY001",
           APNS_PRIVATE_KEY_PEM: apnsPrivateKey,
           ADMIN_TOKEN: "test-admin-token-that-is-not-a-production-secret",
-          ACCOUNT_RATE_PER_SECOND: "0.000001",
-          ACCOUNT_RATE_BURST: "4",
-          TOKEN_RATE_PER_SECOND: "0.000001",
-          TOKEN_RATE_BURST: "1",
-          DAILY_PUSH_LIMIT: "2",
         },
         outboundService: async (request) => {
           const url = new URL(request.url);

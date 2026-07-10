@@ -25,7 +25,6 @@ export interface DeploymentSendInput {
   generation: number;
   idempotencyKey: string;
   payloadHash: string;
-  tokenHash: string;
   requestId: string;
   request: AppleSendRequest;
 }

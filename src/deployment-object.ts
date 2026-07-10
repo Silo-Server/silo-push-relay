@@ -37,11 +37,6 @@ interface RotationRow {
   created_at: number;
 }
 
-interface Bucket {
-  tokens: number;
-  updatedAt: number;
-}
-
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const CLEANUP_BATCH_SIZE = 250;
 const CLEANUP_MAX_BATCHES = 40;
@@ -60,26 +55,20 @@ export interface AuthorizationResult {
 export interface RotationResult {
   ok: boolean;
   metadata?: RotationMetadata;
-  reason?: "disabled" | "revoked" | "invalid_idempotency_key" | "rate_limited";
-  retryAfterSeconds?: number;
+  reason?: "disabled" | "revoked" | "invalid_idempotency_key";
 }
 
 export class DeploymentObject extends DurableObject<Env> {
-  private accountBucket?: Bucket;
-  private readonly tokenBuckets = new Map<string, Bucket>();
   private providerToken?: { token: string; issuedAt: number };
   private cleanupAlarmAt?: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(`
+      DROP TABLE IF EXISTS daily_quota;
       CREATE TABLE IF NOT EXISTS metadata (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS daily_quota (
-        day TEXT PRIMARY KEY,
-        count INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS idempotency (
         key TEXT PRIMARY KEY,
@@ -126,14 +115,6 @@ export class DeploymentObject extends DurableObject<Env> {
   ): RotationResult {
     if (!idempotencyKey || idempotencyKey.length > 255) {
       return { ok: false, reason: "invalid_idempotency_key" };
-    }
-    const accountLimit = this.consumeAccountBucket();
-    if (!accountLimit.allowed) {
-      return {
-        ok: false,
-        reason: "rate_limited",
-        retryAfterSeconds: accountLimit.retryAfterSeconds,
-      };
     }
     const stored = this.ctx.storage.transactionSync<StoredRotationResult>(() => {
       const existing = this.ctx.storage.sql
@@ -200,13 +181,6 @@ export class DeploymentObject extends DurableObject<Env> {
   }
 
   async send(input: DeploymentSendInput): Promise<RelayResult> {
-    const accountLimit = this.consumeAccountBucket();
-    if (!accountLimit.allowed) {
-      return errorResult(429, "rate_limited", "deployment request rate exceeded", input.requestId, {
-        "retry-after": String(accountLimit.retryAfterSeconds),
-      });
-    }
-
     const begin = this.begin(input);
     if (begin.kind === "response") return begin.response;
     this.scheduleCleanupAt(begin.cleanupAt);
@@ -341,37 +315,7 @@ export class DeploymentObject extends DurableObject<Env> {
         return { kind: "proceed", nonce, cleanupAt: now + this.retentionSeconds() };
       }
 
-      const tokenLimit = this.consumeTokenBucket(input.tokenHash);
-      if (!tokenLimit.allowed) {
-        return {
-          kind: "response",
-          response: errorResult(429, "rate_limited", "device rate limit exceeded", input.requestId, {
-            "retry-after": String(tokenLimit.retryAfterSeconds),
-          }),
-        };
-      }
-
-      const day = new Date(now * 1000).toISOString().slice(0, 10);
-      this.ctx.storage.sql.exec("DELETE FROM daily_quota WHERE day < ?", day);
-      const quota = this.ctx.storage.sql
-        .exec<{ count: number }>("SELECT count FROM daily_quota WHERE day = ?", day)
-        .toArray()[0]?.count ?? 0;
-      const dailyLimit = numberSetting(this.env.DAILY_PUSH_LIMIT, "DAILY_PUSH_LIMIT", 1);
-      if (quota >= dailyLimit) {
-        return {
-          kind: "response",
-          response: errorResult(429, "rate_limited", "deployment daily quota exceeded", input.requestId, {
-            "retry-after": String(secondsUntilMidnight(now)),
-          }),
-        };
-      }
-
       const nonce = crypto.randomUUID();
-      this.ctx.storage.sql.exec(
-        `INSERT INTO daily_quota (day, count) VALUES (?, 1)
-         ON CONFLICT(day) DO UPDATE SET count = count + 1`,
-        day,
-      );
       this.ctx.storage.sql.exec(
         `INSERT INTO idempotency
          (key, payload_hash, state, nonce, created_at, updated_at)
@@ -502,53 +446,6 @@ export class DeploymentObject extends DurableObject<Env> {
       .one().value;
   }
 
-  private consumeTokenBucket(tokenHash: string): { allowed: boolean; retryAfterSeconds: number } {
-    const result = this.consumeBucket(
-      this.tokenBuckets.get(tokenHash),
-      numberSetting(this.env.TOKEN_RATE_PER_SECOND, "TOKEN_RATE_PER_SECOND", 0.000_001),
-      numberSetting(this.env.TOKEN_RATE_BURST, "TOKEN_RATE_BURST", 1),
-    );
-    this.tokenBuckets.set(tokenHash, result.bucket);
-    if (this.tokenBuckets.size > 10_000) {
-      const cutoff = Date.now() - 10 * 60 * 1000;
-      for (const [key, bucket] of this.tokenBuckets) {
-        if (bucket.updatedAt < cutoff) this.tokenBuckets.delete(key);
-      }
-    }
-    return { allowed: result.allowed, retryAfterSeconds: result.retryAfterSeconds };
-  }
-
-  private consumeAccountBucket(): { allowed: boolean; retryAfterSeconds: number } {
-    const result = this.consumeBucket(
-      this.accountBucket,
-      numberSetting(this.env.ACCOUNT_RATE_PER_SECOND, "ACCOUNT_RATE_PER_SECOND", 0.000_001),
-      numberSetting(this.env.ACCOUNT_RATE_BURST, "ACCOUNT_RATE_BURST", 1),
-    );
-    this.accountBucket = result.bucket;
-    return { allowed: result.allowed, retryAfterSeconds: result.retryAfterSeconds };
-  }
-
-  private consumeBucket(
-    current: Bucket | undefined,
-    rate: number,
-    capacity: number,
-  ): { allowed: boolean; retryAfterSeconds: number; bucket: Bucket } {
-    const now = Date.now();
-    const bucket = current ?? { tokens: capacity, updatedAt: now };
-    const elapsed = Math.max(0, now - bucket.updatedAt) / 1000;
-    bucket.tokens = Math.min(capacity, bucket.tokens + elapsed * rate);
-    bucket.updatedAt = now;
-    if (bucket.tokens >= 1) {
-      bucket.tokens -= 1;
-      return { allowed: true, retryAfterSeconds: 0, bucket };
-    }
-    return {
-      allowed: false,
-      retryAfterSeconds: Math.max(1, Math.ceil((1 - bucket.tokens) / rate)),
-      bucket,
-    };
-  }
-
   async alarm(): Promise<void> {
     this.cleanupAlarmAt = undefined;
     const now = Math.floor(Date.now() / 1000);
@@ -659,10 +556,4 @@ function parseStoredHeaders(value: string | null): Record<string, string> | unde
   } catch {
     return undefined;
   }
-}
-
-function secondsUntilMidnight(nowSeconds: number): number {
-  const now = new Date(nowSeconds * 1000);
-  const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
-  return Math.max(1, Math.ceil((next - now.getTime()) / 1000));
 }

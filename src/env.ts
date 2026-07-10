@@ -4,6 +4,11 @@ import type { ProviderTokenObject } from "./provider-token-object";
 export interface Env {
   DEPLOYMENTS: DurableObjectNamespace<DeploymentObject>;
   PROVIDER_TOKENS: DurableObjectNamespace<ProviderTokenObject>;
+  INGRESS_RATE_LIMITER: RateLimit;
+  REGISTRATION_IP_RATE_LIMITER: RateLimit;
+  REGISTRATION_LOCATION_RATE_LIMITER: RateLimit;
+  DEPLOYMENT_RATE_LIMITER: RateLimit;
+  DEVICE_RATE_LIMITER: RateLimit;
 
   CAPABILITY_SIGNING_PRIVATE_KEY_PEM: string;
   CAPABILITY_VERIFY_KEYS_JSON: string;
@@ -22,11 +27,6 @@ export interface Env {
   APNS_EXPIRATION_SECONDS: string;
   APNS_TIMEOUT_MS: string;
 
-  DAILY_PUSH_LIMIT: string;
-  ACCOUNT_RATE_PER_SECOND: string;
-  ACCOUNT_RATE_BURST: string;
-  TOKEN_RATE_PER_SECOND: string;
-  TOKEN_RATE_BURST: string;
   IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS: string;
   IDEMPOTENCY_RETENTION_SECONDS: string;
 

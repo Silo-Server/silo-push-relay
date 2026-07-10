@@ -41,10 +41,13 @@ function appleRequest(token = ACCEPT_TOKEN, deliveryId = crypto.randomUUID()): A
   };
 }
 
-async function register(body: Record<string, unknown> = {}): Promise<Registration> {
+async function register(
+  body: Record<string, unknown> = {},
+  clientKey = crypto.randomUUID(),
+): Promise<Registration> {
   const response = await SELF.fetch("https://relay.test/v1/deployments/register", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "cf-connecting-ip": clientKey, "content-type": "application/json" },
     body: JSON.stringify(body),
   });
   expect(response.status).toBe(200);
@@ -502,90 +505,69 @@ describe("relay worker", () => {
     expect((await response.json<ErrorEnvelope>()).error.code).toBe("token_expired");
   });
 
-  it("enforces account, device, and daily push limits", async () => {
-    const accountRegistration = await register();
-    const accountKey = crypto.randomUUID();
-    const accountBody = appleRequest("1".repeat(64));
-    expect((await send(accountRegistration.api_key, accountKey, accountBody)).status).toBe(200);
-    for (let replay = 0; replay < 3; replay += 1) {
-      expect((await send(accountRegistration.api_key, accountKey, accountBody)).status).toBe(200);
+  it("enforces Cloudflare registration, deployment, and device limits", async () => {
+    const registrationClient = "198.51.100.10";
+    for (let registration = 0; registration < 10; registration += 1) {
+      expect((await register({}, registrationClient)).deployment_id).not.toBe("");
     }
-    const accountLimited = await send(accountRegistration.api_key, accountKey, accountBody);
-    expect(accountLimited.status).toBe(429);
-    expect((await accountLimited.json<ErrorEnvelope>()).error.code).toBe("rate_limited");
+    const registrationLimited = await SELF.fetch(
+      "https://relay.test/v1/deployments/register",
+      {
+        method: "POST",
+        headers: {
+          "cf-connecting-ip": registrationClient,
+          "content-type": "application/json",
+        },
+        body: "{}",
+      },
+    );
+    expect(registrationLimited.status).toBe(429);
+    expect(registrationLimited.headers.get("retry-after")).toBe("60");
+    expect((await registrationLimited.json<ErrorEnvelope>()).error.code).toBe(
+      "registration_rate_limited",
+    );
+
+    const deploymentRegistration = await register();
+    for (let request = 0; request < 1_000; request += 1) {
+      expect(
+        (await env.DEPLOYMENT_RATE_LIMITER.limit({ key: deploymentRegistration.deployment_id }))
+          .success,
+      ).toBe(true);
+    }
+    const deploymentLimited = await send(
+      deploymentRegistration.api_key,
+      crypto.randomUUID(),
+      appleRequest("1".repeat(64)),
+    );
+    expect(deploymentLimited.status).toBe(429);
+    expect(deploymentLimited.headers.get("retry-after")).toBe("10");
+    expect((await deploymentLimited.json<ErrorEnvelope>()).error.code).toBe(
+      "deployment_rate_limited",
+    );
 
     const deviceRegistration = await register();
     const deviceToken = "2".repeat(64);
-    expect(
-      (
-        await send(
-          deviceRegistration.api_key,
-          crypto.randomUUID(),
-          appleRequest(deviceToken),
-        )
-      ).status,
-    ).toBe(200);
+    for (let delivery = 0; delivery < 30; delivery += 1) {
+      expect(
+        (
+          await send(
+            deviceRegistration.api_key,
+            crypto.randomUUID(),
+            appleRequest(deviceToken),
+          )
+        ).status,
+      ).toBe(200);
+    }
     const deviceLimited = await send(
       deviceRegistration.api_key,
       crypto.randomUUID(),
       appleRequest(deviceToken),
     );
     expect(deviceLimited.status).toBe(429);
-    expect((await deviceLimited.json<ErrorEnvelope>()).error.message).toContain("device");
-
-    const quotaRegistration = await register();
-    expect(
-      (
-        await send(
-          quotaRegistration.api_key,
-          crypto.randomUUID(),
-          appleRequest("3".repeat(64)),
-        )
-      ).status,
-    ).toBe(200);
-    expect(
-      (
-        await send(
-          quotaRegistration.api_key,
-          crypto.randomUUID(),
-          appleRequest("4".repeat(64)),
-        )
-      ).status,
-    ).toBe(200);
-    const quotaLimited = await send(
-      quotaRegistration.api_key,
-      crypto.randomUUID(),
-      appleRequest("5".repeat(64)),
+    expect(deviceLimited.headers.get("retry-after")).toBe("60");
+    expect((await deviceLimited.json<ErrorEnvelope>()).error.code).toBe(
+      "device_rate_limited",
     );
-    expect(quotaLimited.status).toBe(429);
-    expect((await quotaLimited.json<ErrorEnvelope>()).error.message).toContain("daily quota");
-  });
-
-  it("meters credential rotation with the deployment account bucket", async () => {
-    const registration = await register();
-    const stub = env.DEPLOYMENTS.getByName(registration.deployment_id);
-    await runInDurableObject(stub, (instance) => {
-      const issuedAt = Math.floor(Date.now() / 1000);
-      let generation = 1;
-      for (let rotation = 0; rotation < 4; rotation += 1) {
-        const result = instance.prepareRotation(
-          generation,
-          crypto.randomUUID(),
-          issuedAt,
-          issuedAt + 3600,
-        );
-        expect(result.ok).toBe(true);
-        generation += 1;
-      }
-      const limited = instance.prepareRotation(
-        generation,
-        crypto.randomUUID(),
-        issuedAt,
-        issuedAt + 3600,
-      );
-      expect(limited).toMatchObject({ ok: false, reason: "rate_limited" });
-      expect(limited.retryAfterSeconds).toBeGreaterThan(0);
-    });
   });
 
   it("rotates credentials idempotently without storing the bearer", async () => {
@@ -723,25 +705,16 @@ describe("relay worker", () => {
     });
   });
 
-  it("cleans historical quota rows on the next new delivery", async () => {
+  it("keeps quota state out of new deployment objects", async () => {
     const registration = await register();
     const stub = env.DEPLOYMENTS.getByName(registration.deployment_id);
     await runInDurableObject(stub, (_instance, state) => {
-      state.storage.sql.exec(
-        "INSERT INTO daily_quota (day, count) VALUES ('2000-01-01', 1)",
-      );
-    });
-
-    expect(
-      (await send(registration.api_key, crypto.randomUUID(), appleRequest("9".repeat(64)))).status,
-    ).toBe(200);
-    await runInDurableObject(stub, (_instance, state) => {
       const rows = state.storage.sql
-        .exec<{ day: string; count: number }>("SELECT day, count FROM daily_quota")
+        .exec<{ name: string }>(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'daily_quota'",
+        )
         .toArray();
-      expect(rows).toHaveLength(1);
-      expect(rows[0]?.day).toBe(new Date().toISOString().slice(0, 10));
-      expect(rows[0]?.count).toBe(1);
+      expect(rows).toHaveLength(0);
     });
   });
 

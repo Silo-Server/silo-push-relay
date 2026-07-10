@@ -17,6 +17,7 @@ import {
   responseFromResult,
   strictJSON,
 } from "./http";
+import { clientRateLimitKey, enforceRateLimit } from "./rate-limit";
 import type { CapabilityClaims } from "./types";
 import { APPLE_FIELDS, validateAppleRequest } from "./validation";
 
@@ -31,6 +32,18 @@ export default {
     const requestId = crypto.randomUUID();
     try {
       const url = new URL(request.url);
+      if (request.method === "POST" && url.pathname.startsWith("/v1/")) {
+        const limited = await enforceRateLimit({
+          limiter: env.INGRESS_RATE_LIMITER,
+          key: clientRateLimitKey(request),
+          kind: "ingress",
+          requestId,
+          code: "ingress_rate_limited",
+          message: "request rate exceeded",
+          retryAfterSeconds: 10,
+        });
+        if (limited) return limited;
+      }
       if (request.method === "GET" && url.pathname === "/healthz") {
         return jsonResponse(200, { status: "ok" });
       }
@@ -83,6 +96,27 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 async function handleRegister(request: Request, env: Env, requestId: string): Promise<Response> {
+  const clientKey = clientRateLimitKey(request);
+  const clientLimited = await enforceRateLimit({
+    limiter: env.REGISTRATION_IP_RATE_LIMITER,
+    key: clientKey,
+    kind: "registration_ip",
+    requestId,
+    code: "registration_rate_limited",
+    message: "deployment registration rate exceeded",
+    retryAfterSeconds: 60,
+  });
+  if (clientLimited) return clientLimited;
+  const locationLimited = await enforceRateLimit({
+    limiter: env.REGISTRATION_LOCATION_RATE_LIMITER,
+    key: "register",
+    kind: "registration_location",
+    requestId,
+    code: "registration_rate_limited",
+    message: "deployment registration rate exceeded",
+    retryAfterSeconds: 60,
+  });
+  if (locationLimited) return locationLimited;
   const body = await strictJSON(request, EMPTY_FIELDS, requestId);
   if (body instanceof Response) return body;
   const deploymentId = crypto.randomUUID();
@@ -120,6 +154,8 @@ async function handleRotate(request: Request, env: Env, requestId: string): Prom
   }
   const claims = await verifyRequestToken(request, env, requestId, "deployment:rotate");
   if (claims instanceof Response) return claims;
+  const limited = await limitDeployment(env, claims.sub, requestId);
+  if (limited) return limited;
   const issuedAt = Math.floor(Date.now() / 1000);
   const expiresAt = issuedAt + numberSetting(env.CAPABILITY_TTL_SECONDS, "CAPABILITY_TTL_SECONDS", 60);
   const rotation = await env.DEPLOYMENTS.getByName(claims.sub).prepareRotation(
@@ -129,15 +165,6 @@ async function handleRotate(request: Request, env: Env, requestId: string): Prom
     expiresAt,
   );
   if (!rotation.ok || !rotation.metadata) {
-    if (rotation.reason === "rate_limited") {
-      return errorResponse(
-        429,
-        "rate_limited",
-        "deployment request rate exceeded",
-        requestId,
-        { "retry-after": String(rotation.retryAfterSeconds ?? 1) },
-      );
-    }
     const code = rotation.reason === "invalid_idempotency_key" ? "invalid_field" : "unauthorized";
     const status = code === "invalid_field" ? 400 : 401;
     return errorResponse(status, code, code === "unauthorized" ? "unauthorized" : "invalid Idempotency-Key", requestId);
@@ -163,6 +190,8 @@ async function handleSelfRevoke(request: Request, env: Env, requestId: string): 
   ) {
     return errorResponse(401, "unauthorized", "unauthorized", requestId);
   }
+  const limited = await limitDeployment(env, claims.sub, requestId);
+  if (limited) return limited;
   const result = await env.DEPLOYMENTS.getByName(claims.sub).disable(claims.ver);
   if (!result.allowed) return errorResponse(401, "unauthorized", "unauthorized", requestId);
   return jsonResponse(200, { request_id: requestId, deployment_id: claims.sub, status: "revoked" });
@@ -196,6 +225,8 @@ async function handleAppleSend(request: Request, env: Env, requestId: string): P
   // the hot path: one push should require only one deployment-object request.
   const claims = await verifyRequestToken(request, env, requestId, "apns:send");
   if (claims instanceof Response) return claims;
+  const deploymentLimited = await limitDeployment(env, claims.sub, requestId);
+  if (deploymentLimited) return deploymentLimited;
 
   const idempotencyKey = request.headers.get("idempotency-key")?.trim() ?? "";
   if (!idempotencyKey) {
@@ -227,11 +258,21 @@ async function handleAppleSend(request: Request, env: Env, requestId: string): P
     canonicalAppleHash(appleRequest),
     sha256(appleRequest.token),
   ]);
+  const deviceLimited = await enforceRateLimit({
+    limiter: env.DEVICE_RATE_LIMITER,
+    key: `${claims.sub}:${tokenHash}`,
+    kind: "device",
+    requestId,
+    code: "device_rate_limited",
+    message: "device request rate exceeded",
+    retryAfterSeconds: 60,
+    deploymentId: claims.sub,
+  });
+  if (deviceLimited) return deviceLimited;
   const result = await env.DEPLOYMENTS.getByName(claims.sub).send({
     generation: claims.ver,
     idempotencyKey,
     payloadHash,
-    tokenHash,
     requestId,
     request: appleRequest,
   });
@@ -247,6 +288,8 @@ async function requestCapability(
 ): Promise<CapabilityClaims | Response> {
   const claims = await verifyRequestToken(request, env, requestId, requiredScope, options);
   if (claims instanceof Response) return claims;
+  const limited = await limitDeployment(env, claims.sub, requestId);
+  if (limited) return limited;
   const authorization = await env.DEPLOYMENTS.getByName(claims.sub).authorizeGeneration(claims.ver);
   if (!authorization.allowed) return errorResponse(401, "unauthorized", "unauthorized", requestId);
   return claims;
@@ -269,6 +312,23 @@ async function verifyRequestToken(
     }
     return errorResponse(401, "unauthorized", "unauthorized", requestId);
   }
+}
+
+function limitDeployment(
+  env: Env,
+  deploymentId: string,
+  requestId: string,
+): Promise<Response | undefined> {
+  return enforceRateLimit({
+    limiter: env.DEPLOYMENT_RATE_LIMITER,
+    key: deploymentId,
+    kind: "deployment",
+    requestId,
+    code: "deployment_rate_limited",
+    message: "deployment request rate exceeded",
+    retryAfterSeconds: 10,
+    deploymentId,
+  });
 }
 
 async function credentialResponse(
