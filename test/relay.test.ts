@@ -613,7 +613,25 @@ describe("relay worker", () => {
     expect((await send(firstValue.api_key, crypto.randomUUID(), appleRequest())).status).toBe(200);
   });
 
-  it("uses alarms to drain expired state and preserve abandoned dispatch safety", async () => {
+  it("schedules cleanup only after transient state is created", async () => {
+    const registration = await register();
+    const stub = env.DEPLOYMENTS.getByName(registration.deployment_id);
+    expect(
+      await runInDurableObject(stub, async (_instance, state) => state.storage.getAlarm()),
+    ).toBeNull();
+
+    expect(
+      (await send(registration.api_key, crypto.randomUUID(), appleRequest("8".repeat(64)))).status,
+    ).toBe(200);
+    const alarm = await runInDurableObject(stub, async (_instance, state) =>
+      state.storage.getAlarm(),
+    );
+    expect(alarm).not.toBeNull();
+    expect(alarm as number).toBeGreaterThan(Date.now() + 23 * 60 * 60 * 1000);
+    expect(alarm as number).toBeLessThan(Date.now() + 26 * 60 * 60 * 1000);
+  });
+
+  it("drains expired transient state in bounded alarm batches", async () => {
     const registration = await register();
     const stub = env.DEPLOYMENTS.getByName(registration.deployment_id);
     await runInDurableObject(stub, async (instance, state) => {
@@ -644,16 +662,21 @@ describe("relay worker", () => {
         expired,
       );
       state.storage.sql.exec(
-        "INSERT INTO daily_quota (day, count) VALUES ('2000-01-01', 1)",
+        `INSERT INTO idempotency
+         (key, payload_hash, state, nonce, created_at, updated_at)
+         VALUES ('expired-dispatch', 'hash', 'dispatching', 'nonce', ?, ?)`,
+        expired,
+        expired,
       );
       state.storage.sql.exec(
         `INSERT INTO idempotency
          (key, payload_hash, state, nonce, created_at, updated_at)
-         VALUES ('abandoned', 'hash', 'dispatching', 'nonce', ?, ?)`,
+         VALUES ('recent-dispatch', 'hash', 'dispatching', 'nonce', ?, ?)`,
         now - 61,
         now - 61,
       );
 
+      await state.storage.deleteAlarm();
       await instance.alarm();
 
       expect(
@@ -666,14 +689,59 @@ describe("relay worker", () => {
           .count,
       ).toBe(0);
       expect(
-        state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM daily_quota").one()
-          .count,
-      ).toBe(0);
+        state.storage.sql
+          .exec<{ state: string }>("SELECT state FROM idempotency WHERE key = 'recent-dispatch'")
+          .one().state,
+      ).toBe("dispatching");
+      expect(await state.storage.getAlarm()).not.toBeNull();
+    });
+  });
+
+  it("stops scheduling alarms after transient state drains", async () => {
+    const registration = await register();
+    const stub = env.DEPLOYMENTS.getByName(registration.deployment_id);
+    await runInDurableObject(stub, async (instance, state) => {
+      const expired = Math.floor(Date.now() / 1000) - 86_401;
+      state.storage.sql.exec(
+        `INSERT INTO idempotency
+         (key, payload_hash, state, nonce, response_status, response_body, response_headers,
+          created_at, updated_at)
+         VALUES ('last-expired', 'hash', 'done', NULL, 200, '{}', '{}', ?, ?)`,
+        expired,
+        expired,
+      );
+
+      await state.storage.deleteAlarm();
+      await instance.alarm();
+
       expect(
         state.storage.sql
-          .exec<{ state: string }>("SELECT state FROM idempotency WHERE key = 'abandoned'")
-          .one().state,
-      ).toBe("unknown");
+          .exec<{ count: number }>("SELECT COUNT(*) AS count FROM idempotency")
+          .one().count,
+      ).toBe(0);
+      expect(await state.storage.getAlarm()).toBeNull();
+    });
+  });
+
+  it("cleans historical quota rows on the next new delivery", async () => {
+    const registration = await register();
+    const stub = env.DEPLOYMENTS.getByName(registration.deployment_id);
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec(
+        "INSERT INTO daily_quota (day, count) VALUES ('2000-01-01', 1)",
+      );
+    });
+
+    expect(
+      (await send(registration.api_key, crypto.randomUUID(), appleRequest("9".repeat(64)))).status,
+    ).toBe(200);
+    await runInDurableObject(stub, (_instance, state) => {
+      const rows = state.storage.sql
+        .exec<{ day: string; count: number }>("SELECT day, count FROM daily_quota")
+        .toArray();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.day).toBe(new Date().toISOString().slice(0, 10));
+      expect(rows[0]?.count).toBe(1);
     });
   });
 

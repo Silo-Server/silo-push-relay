@@ -90,9 +90,10 @@ deployments.
   again during the 24-hour idempotency retention window. After that window the
   row may be deleted and a very late retry can dispatch again, so 24 hours is
   the maximum safe automatic retry horizon.
-- Durable Object alarms clean expired idempotency, rotation, and quota state
-  even after a deployment stops sending. Cleanup drains enough bounded batches
-  per alarm to stay ahead of the configured daily push quota.
+- Durable Object alarms are scheduled only while idempotency or rotation state
+  exists. Expirations are coalesced into hourly buckets, cleanup drains bounded
+  batches, and an object stops scheduling alarms once its transient state is
+  gone. Historical quota rows are removed on the next new delivery.
 - Administrative revocations emit a structured audit event containing only the
   request ID and opaque deployment ID.
 - Test provider changes on Cloudflare itself; local `workerd` APNs behavior is

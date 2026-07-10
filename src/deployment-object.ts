@@ -34,6 +34,7 @@ interface RotationRow {
   issued_at: number;
   expires_at: number;
   jti: string;
+  created_at: number;
 }
 
 interface Bucket {
@@ -46,8 +47,10 @@ const CLEANUP_BATCH_SIZE = 250;
 const CLEANUP_MAX_BATCHES = 40;
 
 type BeginResult =
-  | { kind: "proceed"; nonce: string }
+  | { kind: "proceed"; nonce: string; cleanupAt: number }
   | { kind: "response"; response: RelayResult };
+
+type StoredRotationResult = RotationResult & { cleanupAt?: number };
 
 export interface AuthorizationResult {
   allowed: boolean;
@@ -65,7 +68,7 @@ export class DeploymentObject extends DurableObject<Env> {
   private accountBucket?: Bucket;
   private readonly tokenBuckets = new Map<string, Bucket>();
   private providerToken?: { token: string; issuedAt: number };
-  private cleanupAlarmScheduled = false;
+  private cleanupAlarmAt?: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -103,12 +106,7 @@ export class DeploymentObject extends DurableObject<Env> {
       INSERT OR IGNORE INTO metadata (key, value) VALUES ('status', 'active');
       INSERT OR IGNORE INTO metadata (key, value) VALUES ('generation', '1');
     `);
-    void this.ctx.blockConcurrencyWhile(async () => {
-      this.cleanupAlarmScheduled = (await this.ctx.storage.getAlarm()) !== null;
-      if (!this.cleanupAlarmScheduled && this.hasCleanupState()) {
-        await this.setCleanupAlarm();
-      }
-    });
+    void this.ctx.blockConcurrencyWhile(async () => this.restoreCleanupAlarm());
   }
 
   authorizeGeneration(generation: number): AuthorizationResult {
@@ -137,10 +135,10 @@ export class DeploymentObject extends DurableObject<Env> {
         retryAfterSeconds: accountLimit.retryAfterSeconds,
       };
     }
-    const result = this.ctx.storage.transactionSync<RotationResult>(() => {
+    const stored = this.ctx.storage.transactionSync<StoredRotationResult>(() => {
       const existing = this.ctx.storage.sql
         .exec<RotationRow>(
-          `SELECT previous_generation, generation, issued_at, expires_at, jti
+          `SELECT previous_generation, generation, issued_at, expires_at, jti, created_at
            FROM rotations WHERE idempotency_key = ?`,
           idempotencyKey,
         )
@@ -155,6 +153,7 @@ export class DeploymentObject extends DurableObject<Env> {
             expiresAt: existing.expires_at,
             jti: existing.jti,
           },
+          cleanupAt: existing.created_at + this.retentionSeconds(),
         };
       }
 
@@ -182,9 +181,10 @@ export class DeploymentObject extends DurableObject<Env> {
         "UPDATE metadata SET value = ? WHERE key = 'generation'",
         String(metadata.generation),
       );
-      return { ok: true, metadata };
+      return { ok: true, metadata, cleanupAt: issuedAt + this.retentionSeconds() };
     });
-    if (result.ok) this.scheduleCleanupAlarm();
+    if (stored.cleanupAt !== undefined) this.scheduleCleanupAt(stored.cleanupAt);
+    const { cleanupAt: _cleanupAt, ...result } = stored;
     return result;
   }
 
@@ -209,7 +209,7 @@ export class DeploymentObject extends DurableObject<Env> {
 
     const begin = this.begin(input);
     if (begin.kind === "response") return begin.response;
-    this.scheduleCleanupAlarm();
+    this.scheduleCleanupAt(begin.cleanupAt);
 
     let providerToken;
     try {
@@ -338,7 +338,7 @@ export class DeploymentObject extends DurableObject<Env> {
           now,
           input.idempotencyKey,
         );
-        return { kind: "proceed", nonce };
+        return { kind: "proceed", nonce, cleanupAt: now + this.retentionSeconds() };
       }
 
       const tokenLimit = this.consumeTokenBucket(input.tokenHash);
@@ -352,6 +352,7 @@ export class DeploymentObject extends DurableObject<Env> {
       }
 
       const day = new Date(now * 1000).toISOString().slice(0, 10);
+      this.ctx.storage.sql.exec("DELETE FROM daily_quota WHERE day < ?", day);
       const quota = this.ctx.storage.sql
         .exec<{ count: number }>("SELECT count FROM daily_quota WHERE day = ?", day)
         .toArray()[0]?.count ?? 0;
@@ -381,7 +382,7 @@ export class DeploymentObject extends DurableObject<Env> {
         now,
         now,
       );
-      return { kind: "proceed", nonce };
+      return { kind: "proceed", nonce, cleanupAt: now + this.retentionSeconds() };
     });
   }
 
@@ -549,20 +550,28 @@ export class DeploymentObject extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    this.cleanupAlarmScheduled = false;
-    try {
-      this.cleanup(Math.floor(Date.now() / 1000));
-    } finally {
-      if (this.hasCleanupState()) await this.setCleanupAlarm();
-    }
+    this.cleanupAlarmAt = undefined;
+    const now = Math.floor(Date.now() / 1000);
+    this.cleanup(now);
+    const nextCleanupAt = this.nextCleanupAt();
+    if (nextCleanupAt !== undefined) await this.setCleanupAlarmAt(nextCleanupAt);
   }
 
-  private scheduleCleanupAlarm(): void {
-    if (this.cleanupAlarmScheduled) return;
-    this.cleanupAlarmScheduled = true;
+  private async restoreCleanupAlarm(): Promise<void> {
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing !== null) {
+      this.cleanupAlarmAt = existing;
+      return;
+    }
+    const nextCleanupAt = this.nextCleanupAt();
+    if (nextCleanupAt !== undefined) await this.setCleanupAlarmAt(nextCleanupAt);
+  }
+
+  private scheduleCleanupAt(expiresAt: number): void {
+    const target = this.cleanupAlarmTarget(expiresAt);
+    if (this.cleanupAlarmAt !== undefined && this.cleanupAlarmAt <= target) return;
     this.ctx.waitUntil(
-      this.ctx.storage.setAlarm(Date.now() + CLEANUP_INTERVAL_MS).catch((error: unknown) => {
-        this.cleanupAlarmScheduled = false;
+      this.setCleanupAlarmAt(expiresAt).catch((error: unknown) => {
         console.error(
           JSON.stringify({
             event: "cleanup.alarm_schedule_failed",
@@ -573,54 +582,57 @@ export class DeploymentObject extends DurableObject<Env> {
     );
   }
 
-  private async setCleanupAlarm(): Promise<void> {
-    await this.ctx.storage.setAlarm(Date.now() + CLEANUP_INTERVAL_MS);
-    this.cleanupAlarmScheduled = true;
+  private async setCleanupAlarmAt(expiresAt: number): Promise<void> {
+    const target = this.cleanupAlarmTarget(expiresAt);
+    if (this.cleanupAlarmAt !== undefined && this.cleanupAlarmAt <= target) return;
+    this.cleanupAlarmAt = target;
+    try {
+      await this.ctx.storage.setAlarm(target);
+    } catch (error) {
+      if (this.cleanupAlarmAt === target) this.cleanupAlarmAt = undefined;
+      throw error;
+    }
   }
 
-  private hasCleanupState(): boolean {
-    return (
-      this.ctx.storage.sql
-        .exec<{ present: number }>(
-          `SELECT (
-             EXISTS(SELECT 1 FROM idempotency) OR
-             EXISTS(SELECT 1 FROM rotations) OR
-             EXISTS(SELECT 1 FROM daily_quota)
-           ) AS present`,
-        )
-        .one().present === 1
-    );
+  private cleanupAlarmTarget(expiresAt: number): number {
+    const expiresAtMs = expiresAt * 1000;
+    if (expiresAtMs <= Date.now()) return Date.now() + 1000;
+    return Math.ceil(expiresAtMs / CLEANUP_INTERVAL_MS) * CLEANUP_INTERVAL_MS;
   }
 
-  private cleanup(now: number): void {
-    const retention = numberSetting(
+  private nextCleanupAt(): number | undefined {
+    const retention = this.retentionSeconds();
+    const idempotencyUpdatedAt = this.ctx.storage.sql
+      .exec<{ value: number | null }>("SELECT MIN(updated_at) AS value FROM idempotency")
+      .one().value;
+    const rotationCreatedAt = this.ctx.storage.sql
+      .exec<{ value: number | null }>("SELECT MIN(created_at) AS value FROM rotations")
+      .one().value;
+    const candidates = [idempotencyUpdatedAt, rotationCreatedAt]
+      .filter((value): value is number => value !== null)
+      .map((value) => value + retention);
+    return candidates.length > 0 ? Math.min(...candidates) : undefined;
+  }
+
+  private retentionSeconds(): number {
+    return numberSetting(
       this.env.IDEMPOTENCY_RETENTION_SECONDS,
       "IDEMPOTENCY_RETENTION_SECONDS",
       60,
     );
-    const staleAfter = numberSetting(
-      this.env.IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS,
-      "IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS",
-      1,
-    );
-    this.ctx.storage.sql.exec(
-      `UPDATE idempotency
-       SET state = 'unknown', nonce = NULL, response_status = NULL, response_body = NULL,
-           response_headers = NULL, updated_at = ?
-       WHERE state = 'dispatching' AND updated_at < ?`,
-      now,
-      now - staleAfter,
-    );
+  }
+
+  private cleanup(now: number): void {
+    const retention = this.retentionSeconds();
     this.deleteInBatches(
       `DELETE FROM idempotency
        WHERE key IN (
          SELECT key FROM idempotency
-         WHERE state != 'dispatching' AND updated_at < ?
+         WHERE updated_at < ?
          LIMIT ${CLEANUP_BATCH_SIZE}
        )`,
       now - retention,
     );
-    this.ctx.storage.sql.exec("DELETE FROM daily_quota WHERE day < ?", daysAgo(now, 2));
     this.deleteInBatches(
       `DELETE FROM rotations
        WHERE idempotency_key IN (
@@ -653,8 +665,4 @@ function secondsUntilMidnight(nowSeconds: number): number {
   const now = new Date(nowSeconds * 1000);
   const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
   return Math.max(1, Math.ceil((next - now.getTime()) / 1000));
-}
-
-function daysAgo(nowSeconds: number, days: number): string {
-  return new Date((nowSeconds - days * 24 * 60 * 60) * 1000).toISOString().slice(0, 10);
 }
