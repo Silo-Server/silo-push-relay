@@ -1,17 +1,20 @@
-# Build output
-/bin/
-/out/
+# Dependencies and build output
+node_modules/
+.wrangler/
+coverage/
+dist/
 
-# Secrets — must never be committed (APNs key / FCM service account / env)
-*.p8
-*service-account*.json
-*serviceAccount*.json
-*firebase-adminsdk*.json
-credentials.json
-key.json
+# Local configuration and secrets
+.dev.vars
 .env
 .env.*
+*.p8
+*.pem
+*service-account*.json
+credentials.json
+key.json
 
-# Test / coverage artifacts
-*.out
-coverage.*
+# Local tooling and OS files
+.codex/
+.DS_Store
+bin/

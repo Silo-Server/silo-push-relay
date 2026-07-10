@@ -1,0 +1,65 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "silo-push-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-10",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "push.siloserver.org/*",
+      "zone_name": "siloserver.org"
+    }
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "CAPABILITY_ISSUER": "https://push.siloserver.org",
+    "CAPABILITY_AUDIENCE": "silo-push-relay",
+    "CAPABILITY_SIGNING_KEY_ID": "v1",
+    "CAPABILITY_TTL_SECONDS": "2592000",
+    "CAPABILITY_RENEW_GRACE_SECONDS": "604800",
+    "APNS_TOPICS": "org.siloserver.silo",
+    "APNS_PRODUCTION_URL": "https://api.push.apple.com",
+    "APNS_SANDBOX_URL": "https://api.sandbox.push.apple.com",
+    "APNS_EXPIRATION_SECONDS": "900",
+    "APNS_TIMEOUT_MS": "10000",
+    "DAILY_PUSH_LIMIT": "50000",
+    "ACCOUNT_RATE_PER_SECOND": "10",
+    "ACCOUNT_RATE_BURST": "20",
+    "TOKEN_RATE_PER_SECOND": "0.3333333333",
+    "TOKEN_RATE_BURST": "1",
+    "IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS": "30",
+    "IDEMPOTENCY_RETENTION_SECONDS": "86400"
+  },
+  "secrets": {
+    "required": [
+      "CAPABILITY_SIGNING_PRIVATE_KEY_PEM",
+      "CAPABILITY_VERIFY_KEYS_JSON",
+      "APNS_TEAM_ID",
+      "APNS_KEY_ID",
+      "APNS_PRIVATE_KEY_PEM",
+      "ADMIN_TOKEN"
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "DEPLOYMENTS",
+        "class_name": "DeploymentObject"
+      },
+      {
+        "name": "PROVIDER_TOKENS",
+        "class_name": "ProviderTokenObject"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["DeploymentObject", "ProviderTokenObject"]
+    }
+  ]
+}
