@@ -225,6 +225,58 @@ describe("relay worker", () => {
     );
   });
 
+  it("uses a stable indexed cleanup deadline and replays successful responses exactly", async () => {
+    const registration = await register();
+    const key = crypto.randomUUID();
+    const body = appleRequest();
+    const stub = env.DEPLOYMENTS.getByName(registration.deployment_id);
+    await runInDurableObject(stub, (_instance, state) => {
+      const columns = state.storage.sql
+        .exec<{ name: string }>("PRAGMA table_info(idempotency)")
+        .toArray()
+        .map((column) => column.name);
+      expect(columns).toContain("cleanup_at");
+
+      const indexes = state.storage.sql
+        .exec<{ name: string }>("PRAGMA index_list(idempotency)")
+        .toArray()
+        .map((index) => index.name);
+      expect(indexes).toContain("idempotency_cleanup_at_idx");
+      expect(indexes).not.toContain("idempotency_updated_at_idx");
+
+      state.storage.sql.exec(`
+        CREATE TABLE cleanup_at_updates (previous INTEGER NOT NULL, next INTEGER NOT NULL);
+        CREATE TRIGGER track_cleanup_at_updates
+        AFTER UPDATE OF cleanup_at ON idempotency
+        BEGIN
+          INSERT INTO cleanup_at_updates (previous, next) VALUES (OLD.cleanup_at, NEW.cleanup_at);
+        END;
+      `);
+    });
+
+    const first = await send(registration.api_key, key, body);
+    const firstText = await first.text();
+    expect(first.status).toBe(200);
+    await runInDurableObject(stub, (_instance, state) => {
+      const row = state.storage.sql
+        .exec<{ created_at: number; cleanup_at: number; state: string }>(
+          "SELECT created_at, cleanup_at, state FROM idempotency WHERE key = ?",
+          key,
+        )
+        .one();
+      expect(row.state).toBe("done");
+      expect(row.cleanup_at).toBe(row.created_at + 86_400);
+      expect(
+        state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM cleanup_at_updates")
+          .one().count,
+      ).toBe(0);
+    });
+
+    const replay = await send(registration.api_key, key, body);
+    expect(replay.status).toBe(first.status);
+    expect(await replay.text()).toBe(firstText);
+  });
+
   it("allows the same key to retry a definitive APNs 5xx", async () => {
     const registration = await register();
     const key = crypto.randomUUID();
@@ -232,8 +284,19 @@ describe("relay worker", () => {
     const first = await send(registration.api_key, key, body);
     expect(first.status).toBe(503);
     expect((await first.json<ErrorEnvelope>()).error.apns_id).toBe("retryable-apns-id");
+    const stub = env.DEPLOYMENTS.getByName(registration.deployment_id);
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec("UPDATE idempotency SET cleanup_at = 1 WHERE key = ?", key);
+    });
     const second = await send(registration.api_key, key, body);
     expect(second.status).toBe(200);
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(
+        state.storage.sql
+          .exec<{ cleanup_at: number }>("SELECT cleanup_at FROM idempotency WHERE key = ?", key)
+          .one().cleanup_at,
+      ).toBeGreaterThan(Math.floor(Date.now() / 1000) + 86_300);
+    });
   });
 
   it("stores terminal APNs device rejection responses", async () => {
@@ -408,7 +471,11 @@ describe("relay worker", () => {
       appleRequest(EXPIRED_PROVIDER_TOKEN),
     );
     expect(response.status).toBe(200);
-    expect((await response.json<{ status: string }>()).status).toBe("accepted");
+    expect(await response.json<{ status: string; apns_id: string }>()).toEqual({
+      status: "accepted",
+      apns_id: `accepted-${EXPIRED_PROVIDER_TOKEN.slice(0, 8)}-2`,
+      request_id: expect.any(String),
+    });
   });
 
   it("converts abandoned dispatches to unknown instead of resending", async () => {
@@ -421,19 +488,27 @@ describe("relay worker", () => {
       const stale = Math.floor(Date.now() / 1000) - 61;
       state.storage.sql.exec(
         `INSERT INTO idempotency
-         (key, payload_hash, state, nonce, created_at, updated_at)
-         VALUES (?, ?, 'dispatching', ?, ?, ?)`,
+         (key, payload_hash, state, nonce, created_at, updated_at, cleanup_at)
+         VALUES (?, ?, 'dispatching', ?, ?, ?, ?)`,
         key,
         payloadHash,
         crypto.randomUUID(),
         stale,
         stale,
+        stale + 86_400,
       );
     });
 
     const response = await send(registration.api_key, key, body);
     expect(response.status).toBe(409);
     expect((await response.json<{ error: { code: string } }>()).error.code).toBe("delivery_unknown");
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(
+        state.storage.sql
+          .exec<{ cleanup_at: number }>("SELECT cleanup_at FROM idempotency WHERE key = ?", key)
+          .one().cleanup_at,
+      ).toBeGreaterThan(Math.floor(Date.now() / 1000) + 86_300);
+    });
   });
 
   it("returns 425 while an idempotent dispatch is still in progress", async () => {
@@ -446,13 +521,14 @@ describe("relay worker", () => {
       const now = Math.floor(Date.now() / 1000);
       state.storage.sql.exec(
         `INSERT INTO idempotency
-         (key, payload_hash, state, nonce, created_at, updated_at)
-         VALUES (?, ?, 'dispatching', ?, ?, ?)`,
+         (key, payload_hash, state, nonce, created_at, updated_at, cleanup_at)
+         VALUES (?, ?, 'dispatching', ?, ?, ?, ?)`,
         key,
         payloadHash,
         crypto.randomUUID(),
         now,
         now,
+        now + 86_400,
       );
     });
 
@@ -625,9 +701,10 @@ describe("relay worker", () => {
          )
          INSERT INTO idempotency
          (key, payload_hash, state, nonce, response_status, response_body, response_headers,
-          created_at, updated_at)
-         SELECT 'expired-' || value, 'hash', 'done', NULL, 200, '{}', '{}', ?, ?
+          created_at, updated_at, cleanup_at)
+         SELECT 'expired-' || value, 'hash', 'done', NULL, 200, '{}', '{}', ?, ?, ?
          FROM sequence`,
+        expired,
         expired,
         expired,
       );
@@ -645,17 +722,19 @@ describe("relay worker", () => {
       );
       state.storage.sql.exec(
         `INSERT INTO idempotency
-         (key, payload_hash, state, nonce, created_at, updated_at)
-         VALUES ('expired-dispatch', 'hash', 'dispatching', 'nonce', ?, ?)`,
+         (key, payload_hash, state, nonce, created_at, updated_at, cleanup_at)
+         VALUES ('expired-dispatch', 'hash', 'dispatching', 'nonce', ?, ?, ?)`,
+        expired,
         expired,
         expired,
       );
       state.storage.sql.exec(
         `INSERT INTO idempotency
-         (key, payload_hash, state, nonce, created_at, updated_at)
-         VALUES ('recent-dispatch', 'hash', 'dispatching', 'nonce', ?, ?)`,
+         (key, payload_hash, state, nonce, created_at, updated_at, cleanup_at)
+         VALUES ('recent-dispatch', 'hash', 'dispatching', 'nonce', ?, ?, ?)`,
         now - 61,
         now - 61,
+        now + 86_339,
       );
 
       await state.storage.deleteAlarm();
@@ -687,8 +766,9 @@ describe("relay worker", () => {
       state.storage.sql.exec(
         `INSERT INTO idempotency
          (key, payload_hash, state, nonce, response_status, response_body, response_headers,
-          created_at, updated_at)
-         VALUES ('last-expired', 'hash', 'done', NULL, 200, '{}', '{}', ?, ?)`,
+          created_at, updated_at, cleanup_at)
+         VALUES ('last-expired', 'hash', 'done', NULL, 200, '{}', '{}', ?, ?, ?)`,
+        expired,
         expired,
         expired,
       );
