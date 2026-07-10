@@ -27,11 +27,11 @@ export default defineConfig({
           APNS_KEY_ID: "TESTKEY001",
           APNS_PRIVATE_KEY_PEM: apnsPrivateKey,
           ADMIN_TOKEN: "test-admin-token-that-is-not-a-production-secret",
-          ACCOUNT_RATE_PER_SECOND: "10000",
-          ACCOUNT_RATE_BURST: "10000",
-          TOKEN_RATE_PER_SECOND: "10000",
-          TOKEN_RATE_BURST: "10000",
-          DAILY_PUSH_LIMIT: "10000",
+          ACCOUNT_RATE_PER_SECOND: "0.000001",
+          ACCOUNT_RATE_BURST: "4",
+          TOKEN_RATE_PER_SECOND: "0.000001",
+          TOKEN_RATE_BURST: "1",
+          DAILY_PUSH_LIMIT: "2",
         },
         outboundService: async (request) => {
           const url = new URL(request.url);
@@ -67,13 +67,19 @@ export default defineConfig({
           if (token === "c".repeat(64) && count === 1) {
             return new Response(JSON.stringify({ reason: "InternalServerError" }), {
               status: 503,
-              headers: { "retry-after": "1" },
+              headers: { "apns-id": "retryable-apns-id", "retry-after": "1" },
             });
           }
-          if (token === "d".repeat(64)) {
+          if (token === "d".repeat(64) && count === 1) {
             return new Response(JSON.stringify({ reason: "BadEnvironmentKeyIdInToken" }), {
               status: 403,
               headers: { "apns-id": "configuration-apns-id" },
+            });
+          }
+          if (token === "e".repeat(64) && count === 1) {
+            return new Response(JSON.stringify({ reason: "ExpiredProviderToken" }), {
+              status: 403,
+              headers: { "apns-id": "expired-provider-token-apns-id" },
             });
           }
           return new Response("", {

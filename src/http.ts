@@ -10,8 +10,13 @@ export function jsonResponse(status: number, value: unknown, headers?: HeadersIn
   return new Response(JSON.stringify(value), { status, headers: responseHeaders });
 }
 
-export function errorBody(code: string, message: string, requestId: string): string {
-  return JSON.stringify({ error: { code, message, request_id: requestId } });
+export function errorBody(
+  code: string,
+  message: string,
+  requestId: string,
+  details?: Record<string, unknown>,
+): string {
+  return JSON.stringify({ error: { code, message, request_id: requestId, ...details } });
 }
 
 export function errorResponse(
@@ -33,8 +38,9 @@ export function errorResult(
   message: string,
   requestId: string,
   headers?: Record<string, string>,
+  details?: Record<string, unknown>,
 ): RelayResult {
-  return { status, body: errorBody(code, message, requestId), headers };
+  return { status, body: errorBody(code, message, requestId, details), headers };
 }
 
 export function responseFromResult(result: RelayResult): Response {
@@ -50,8 +56,19 @@ export async function strictJSON(
   requestId: string,
   maxBytes = 16 << 10,
 ): Promise<Record<string, unknown> | Response> {
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > maxBytes) {
+  const declaredLength = request.headers.get("content-length");
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength);
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0) {
+      return errorResponse(400, "bad_request", "invalid Content-Length", requestId);
+    }
+    if (parsedLength > maxBytes) {
+      return errorResponse(413, "request_too_large", "request body is too large", requestId);
+    }
+  }
+
+  const bytes = await readBoundedBody(request, maxBytes);
+  if (bytes === undefined) {
     return errorResponse(413, "request_too_large", "request body is too large", requestId);
   }
 
@@ -71,6 +88,35 @@ export async function strictJSON(
     }
   }
   return object;
+}
+
+async function readBoundedBody(request: Request, maxBytes: number): Promise<Uint8Array | undefined> {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("request body is too large");
+        return undefined;
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 export function bearerToken(request: Request): string | undefined {

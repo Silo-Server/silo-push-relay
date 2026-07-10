@@ -4,7 +4,12 @@ import type { AppleSendRequest, CapabilityClaims } from "./types";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const CAPABILITY_TYPE = "silo-relay-cap+jwt";
-const CAPABILITY_SCOPE = ["apns:send", "deployment:renew", "deployment:rotate"];
+const CAPABILITY_SCOPE = [
+  "apns:send",
+  "deployment:renew",
+  "deployment:rotate",
+  "deployment:revoke",
+];
 let signingKeyCache:
   | { pem: string; key: Promise<CryptoKey> }
   | undefined;

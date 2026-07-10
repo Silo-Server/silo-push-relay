@@ -54,4 +54,5 @@ export type APNsResult =
       status: number;
       retryAfterSeconds?: number;
     }
+  | { kind: "internal"; reason: string }
   | { kind: "unknown"; reason: string };

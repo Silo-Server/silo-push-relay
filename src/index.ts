@@ -129,6 +129,15 @@ async function handleRotate(request: Request, env: Env, requestId: string): Prom
     expiresAt,
   );
   if (!rotation.ok || !rotation.metadata) {
+    if (rotation.reason === "rate_limited") {
+      return errorResponse(
+        429,
+        "rate_limited",
+        "deployment request rate exceeded",
+        requestId,
+        { "retry-after": String(rotation.retryAfterSeconds ?? 1) },
+      );
+    }
     const code = rotation.reason === "invalid_idempotency_key" ? "invalid_field" : "unauthorized";
     const status = code === "invalid_field" ? 400 : 401;
     return errorResponse(status, code, code === "unauthorized" ? "unauthorized" : "invalid Idempotency-Key", requestId);
@@ -144,8 +153,16 @@ async function handleRotate(request: Request, env: Env, requestId: string): Prom
 async function handleSelfRevoke(request: Request, env: Env, requestId: string): Promise<Response> {
   const body = await strictJSON(request, EMPTY_FIELDS, requestId);
   if (body instanceof Response) return body;
-  const claims = await requestCapability(request, env, requestId, "deployment:rotate");
+  const claims = await verifyRequestToken(request, env, requestId);
   if (claims instanceof Response) return claims;
+  // Capabilities issued before deployment:revoke existed used deployment:rotate
+  // for self-revocation. Keep those credentials valid until their normal expiry.
+  if (
+    !claims.scope.includes("deployment:revoke") &&
+    !claims.scope.includes("deployment:rotate")
+  ) {
+    return errorResponse(401, "unauthorized", "unauthorized", requestId);
+  }
   const result = await env.DEPLOYMENTS.getByName(claims.sub).disable(claims.ver);
   if (!result.allowed) return errorResponse(401, "unauthorized", "unauthorized", requestId);
   return jsonResponse(200, { request_id: requestId, deployment_id: claims.sub, status: "revoked" });
@@ -163,6 +180,13 @@ async function handleAdminRevoke(request: Request, env: Env, requestId: string):
     return errorResponse(400, "invalid_field", "deployment_id must be 1-128 characters", requestId);
   }
   await env.DEPLOYMENTS.getByName(deploymentId).disable();
+  console.log(
+    JSON.stringify({
+      event: "deployment.admin_revoked",
+      request_id: requestId,
+      deployment_id: deploymentId,
+    }),
+  );
   return jsonResponse(200, { request_id: requestId, deployment_id: deploymentId, status: "revoked" });
 }
 
@@ -232,7 +256,7 @@ async function verifyRequestToken(
   request: Request,
   env: Env,
   requestId: string,
-  requiredScope: string,
+  requiredScope?: string,
   options: { allowExpiredSeconds?: number } = {},
 ): Promise<CapabilityClaims | Response> {
   const token = bearerToken(request);

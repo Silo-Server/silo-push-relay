@@ -2,6 +2,7 @@ import { errorResponse } from "./http";
 import type { AppleSendRequest } from "./types";
 
 const APNS_TOKEN = /^[0-9a-fA-F]{64,200}$/u;
+const PRINTABLE_ASCII = /^[\u0020-\u007e]+$/u;
 const APPLE_FIELDS = new Set([
   "token",
   "environment",
@@ -64,8 +65,29 @@ export function validateAppleRequest(
     return errorResponse(400, "invalid_field", "badge must be between 0 and 9999", requestId);
   }
   const collapseId = object.collapse_id;
-  if (collapseId !== undefined && (typeof collapseId !== "string" || encoderLength(collapseId) > 64)) {
-    return errorResponse(400, "invalid_collapse_id", "collapse_id must be at most 64 bytes", requestId);
+  let normalizedCollapseId: string | undefined;
+  if (collapseId !== undefined) {
+    if (typeof collapseId !== "string") {
+      return errorResponse(
+        400,
+        "invalid_collapse_id",
+        "collapse_id must be 1-64 bytes of printable ASCII",
+        requestId,
+      );
+    }
+    normalizedCollapseId = collapseId.trim();
+    if (
+      !normalizedCollapseId ||
+      encoderLength(normalizedCollapseId) > 64 ||
+      !PRINTABLE_ASCII.test(normalizedCollapseId)
+    ) {
+      return errorResponse(
+        400,
+        "invalid_collapse_id",
+        "collapse_id must be 1-64 bytes of printable ASCII",
+        requestId,
+      );
+    }
   }
 
   return {
@@ -76,7 +98,7 @@ export function validateAppleRequest(
     server_device_id: serverDeviceId,
     delivery_id: deliveryId,
     ...(badge === undefined ? {} : { badge: badge as number }),
-    ...(collapseId === undefined ? {} : { collapse_id: collapseId as string }),
+    ...(normalizedCollapseId === undefined ? {} : { collapse_id: normalizedCollapseId }),
   };
 }
 

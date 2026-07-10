@@ -41,6 +41,10 @@ interface Bucket {
   updatedAt: number;
 }
 
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+const CLEANUP_BATCH_SIZE = 250;
+const CLEANUP_MAX_BATCHES = 40;
+
 type BeginResult =
   | { kind: "proceed"; nonce: string }
   | { kind: "response"; response: RelayResult };
@@ -53,14 +57,15 @@ export interface AuthorizationResult {
 export interface RotationResult {
   ok: boolean;
   metadata?: RotationMetadata;
-  reason?: "disabled" | "revoked" | "invalid_idempotency_key";
+  reason?: "disabled" | "revoked" | "invalid_idempotency_key" | "rate_limited";
+  retryAfterSeconds?: number;
 }
 
 export class DeploymentObject extends DurableObject<Env> {
   private accountBucket?: Bucket;
   private readonly tokenBuckets = new Map<string, Bucket>();
   private providerToken?: { token: string; issuedAt: number };
-  private lastCleanupAt = 0;
+  private cleanupAlarmScheduled = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -98,6 +103,12 @@ export class DeploymentObject extends DurableObject<Env> {
       INSERT OR IGNORE INTO metadata (key, value) VALUES ('status', 'active');
       INSERT OR IGNORE INTO metadata (key, value) VALUES ('generation', '1');
     `);
+    void this.ctx.blockConcurrencyWhile(async () => {
+      this.cleanupAlarmScheduled = (await this.ctx.storage.getAlarm()) !== null;
+      if (!this.cleanupAlarmScheduled && this.hasCleanupState()) {
+        await this.setCleanupAlarm();
+      }
+    });
   }
 
   authorizeGeneration(generation: number): AuthorizationResult {
@@ -118,7 +129,15 @@ export class DeploymentObject extends DurableObject<Env> {
     if (!idempotencyKey || idempotencyKey.length > 255) {
       return { ok: false, reason: "invalid_idempotency_key" };
     }
-    return this.ctx.storage.transactionSync(() => {
+    const accountLimit = this.consumeAccountBucket();
+    if (!accountLimit.allowed) {
+      return {
+        ok: false,
+        reason: "rate_limited",
+        retryAfterSeconds: accountLimit.retryAfterSeconds,
+      };
+    }
+    const result = this.ctx.storage.transactionSync<RotationResult>(() => {
       const existing = this.ctx.storage.sql
         .exec<RotationRow>(
           `SELECT previous_generation, generation, issued_at, expires_at, jti
@@ -165,24 +184,23 @@ export class DeploymentObject extends DurableObject<Env> {
       );
       return { ok: true, metadata };
     });
+    if (result.ok) this.scheduleCleanupAlarm();
+    return result;
   }
 
   disable(generation?: number): AuthorizationResult {
-    if (generation !== undefined) {
-      const authorized = this.authorizeGeneration(generation);
-      if (!authorized.allowed) return authorized;
-    }
-    this.ctx.storage.sql.exec("UPDATE metadata SET value = 'disabled' WHERE key = 'status'");
-    return { allowed: true };
+    return this.ctx.storage.transactionSync(() => {
+      if (generation !== undefined && generation !== Number(this.metadata("generation"))) {
+        return { allowed: false, reason: "revoked" };
+      }
+      if (this.metadata("status") === "disabled") return { allowed: true };
+      this.ctx.storage.sql.exec("UPDATE metadata SET value = 'disabled' WHERE key = 'status'");
+      return { allowed: true };
+    });
   }
 
   async send(input: DeploymentSendInput): Promise<RelayResult> {
-    const accountLimit = this.consumeBucket(
-      this.accountBucket,
-      numberSetting(this.env.ACCOUNT_RATE_PER_SECOND, "ACCOUNT_RATE_PER_SECOND", 0.000_001),
-      numberSetting(this.env.ACCOUNT_RATE_BURST, "ACCOUNT_RATE_BURST", 1),
-    );
-    this.accountBucket = accountLimit.bucket;
+    const accountLimit = this.consumeAccountBucket();
     if (!accountLimit.allowed) {
       return errorResult(429, "rate_limited", "deployment request rate exceeded", input.requestId, {
         "retry-after": String(accountLimit.retryAfterSeconds),
@@ -191,6 +209,7 @@ export class DeploymentObject extends DurableObject<Env> {
 
     const begin = this.begin(input);
     if (begin.kind === "response") return begin.response;
+    this.scheduleCleanupAlarm();
 
     let providerToken;
     try {
@@ -202,10 +221,10 @@ export class DeploymentObject extends DurableObject<Env> {
 
     let delivery = await sendToAPNs(this.env, input.request, providerToken);
     if (delivery.expiredProviderToken) {
-      const tokenStub = this.env.PROVIDER_TOKENS.getByName("apns");
-      await tokenStub.invalidate(delivery.expiredProviderToken);
-      this.providerToken = undefined;
       try {
+        const tokenStub = this.env.PROVIDER_TOKENS.getByName("apns");
+        await tokenStub.invalidate(delivery.expiredProviderToken);
+        this.providerToken = undefined;
         providerToken = await this.getProviderToken();
         delivery = await sendToAPNs(this.env, input.request, providerToken);
       } catch {
@@ -362,7 +381,6 @@ export class DeploymentObject extends DurableObject<Env> {
         now,
         now,
       );
-      this.cleanup(now);
       return { kind: "proceed", nonce };
     });
   }
@@ -388,8 +406,18 @@ export class DeploymentObject extends DurableObject<Env> {
         status === 429 ? "APNs upstream rate limited the request" : "APNs upstream unavailable",
         input.requestId,
         result.retryAfterSeconds ? { "retry-after": String(result.retryAfterSeconds) } : undefined,
+        result.apnsId ? { apns_id: result.apnsId } : undefined,
       );
       return response;
+    }
+    if (result.kind === "internal") {
+      this.markRetryable(input.idempotencyKey, nonce, now);
+      return errorResult(
+        500,
+        "internal_error",
+        "internal server error",
+        input.requestId,
+      );
     }
     if (result.kind === "terminal") {
       const response = errorResult(
@@ -397,6 +425,8 @@ export class DeploymentObject extends DurableObject<Env> {
         "apns_rejected",
         `APNs rejected the notification: ${result.reason}`,
         input.requestId,
+        undefined,
+        result.apnsId ? { apns_id: result.apnsId } : undefined,
       );
       this.storeFinal(input.idempotencyKey, nonce, "done", response, now);
       return response;
@@ -407,8 +437,10 @@ export class DeploymentObject extends DurableObject<Env> {
         "upstream_auth_error",
         `APNs authentication rejected: ${result.reason}`,
         input.requestId,
+        { "retry-after": "60" },
+        result.apnsId ? { apns_id: result.apnsId } : undefined,
       );
-      this.storeFinal(input.idempotencyKey, nonce, "done", response, now);
+      this.markRetryable(input.idempotencyKey, nonce, now);
       return response;
     }
 
@@ -485,6 +517,16 @@ export class DeploymentObject extends DurableObject<Env> {
     return { allowed: result.allowed, retryAfterSeconds: result.retryAfterSeconds };
   }
 
+  private consumeAccountBucket(): { allowed: boolean; retryAfterSeconds: number } {
+    const result = this.consumeBucket(
+      this.accountBucket,
+      numberSetting(this.env.ACCOUNT_RATE_PER_SECOND, "ACCOUNT_RATE_PER_SECOND", 0.000_001),
+      numberSetting(this.env.ACCOUNT_RATE_BURST, "ACCOUNT_RATE_BURST", 1),
+    );
+    this.accountBucket = result.bucket;
+    return { allowed: result.allowed, retryAfterSeconds: result.retryAfterSeconds };
+  }
+
   private consumeBucket(
     current: Bucket | undefined,
     rate: number,
@@ -506,21 +548,95 @@ export class DeploymentObject extends DurableObject<Env> {
     };
   }
 
+  async alarm(): Promise<void> {
+    this.cleanupAlarmScheduled = false;
+    try {
+      this.cleanup(Math.floor(Date.now() / 1000));
+    } finally {
+      if (this.hasCleanupState()) await this.setCleanupAlarm();
+    }
+  }
+
+  private scheduleCleanupAlarm(): void {
+    if (this.cleanupAlarmScheduled) return;
+    this.cleanupAlarmScheduled = true;
+    this.ctx.waitUntil(
+      this.ctx.storage.setAlarm(Date.now() + CLEANUP_INTERVAL_MS).catch((error: unknown) => {
+        this.cleanupAlarmScheduled = false;
+        console.error(
+          JSON.stringify({
+            event: "cleanup.alarm_schedule_failed",
+            error: error instanceof Error ? error.name : "unknown_error",
+          }),
+        );
+      }),
+    );
+  }
+
+  private async setCleanupAlarm(): Promise<void> {
+    await this.ctx.storage.setAlarm(Date.now() + CLEANUP_INTERVAL_MS);
+    this.cleanupAlarmScheduled = true;
+  }
+
+  private hasCleanupState(): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec<{ present: number }>(
+          `SELECT (
+             EXISTS(SELECT 1 FROM idempotency) OR
+             EXISTS(SELECT 1 FROM rotations) OR
+             EXISTS(SELECT 1 FROM daily_quota)
+           ) AS present`,
+        )
+        .one().present === 1
+    );
+  }
+
   private cleanup(now: number): void {
-    if (now - this.lastCleanupAt < 60 * 60) return;
-    this.lastCleanupAt = now;
     const retention = numberSetting(
       this.env.IDEMPOTENCY_RETENTION_SECONDS,
       "IDEMPOTENCY_RETENTION_SECONDS",
       60,
     );
+    const staleAfter = numberSetting(
+      this.env.IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS,
+      "IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS",
+      1,
+    );
     this.ctx.storage.sql.exec(
+      `UPDATE idempotency
+       SET state = 'unknown', nonce = NULL, response_status = NULL, response_body = NULL,
+           response_headers = NULL, updated_at = ?
+       WHERE state = 'dispatching' AND updated_at < ?`,
+      now,
+      now - staleAfter,
+    );
+    this.deleteInBatches(
       `DELETE FROM idempotency
-       WHERE key IN (SELECT key FROM idempotency WHERE updated_at < ? LIMIT 250)`,
+       WHERE key IN (
+         SELECT key FROM idempotency
+         WHERE state != 'dispatching' AND updated_at < ?
+         LIMIT ${CLEANUP_BATCH_SIZE}
+       )`,
       now - retention,
     );
     this.ctx.storage.sql.exec("DELETE FROM daily_quota WHERE day < ?", daysAgo(now, 2));
-    this.ctx.storage.sql.exec("DELETE FROM rotations WHERE created_at < ?", now - retention);
+    this.deleteInBatches(
+      `DELETE FROM rotations
+       WHERE idempotency_key IN (
+         SELECT idempotency_key FROM rotations
+         WHERE created_at < ?
+         LIMIT ${CLEANUP_BATCH_SIZE}
+       )`,
+      now - retention,
+    );
+  }
+
+  private deleteInBatches(statement: string, cutoff: number): void {
+    for (let batch = 0; batch < CLEANUP_MAX_BATCHES; batch += 1) {
+      const result = this.ctx.storage.sql.exec(statement, cutoff);
+      if (result.rowsWritten < CLEANUP_BATCH_SIZE) return;
+    }
   }
 }
 

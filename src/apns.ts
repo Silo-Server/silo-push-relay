@@ -3,22 +3,17 @@ import { numberSetting } from "./env";
 import type { ProviderToken } from "./provider-token-object";
 import type { APNsResult, AppleSendRequest } from "./types";
 
-const TERMINAL_DEVICE_REASONS = new Set([
-  "BadDeviceToken",
-  "DeviceTokenNotForTopic",
-  "Unregistered",
-]);
 // Apple currently documents BadEnvironmentKeyIdInToken. APNs has also returned
 // the older BadEnvironmentKeyInToken spelling in production, so recognize both.
 const CONFIGURATION_REASONS = new Set([
+  "BadCertificate",
+  "BadCertificateEnvironment",
   "BadEnvironmentKeyIdInToken",
   "BadEnvironmentKeyInToken",
-]);
-const PROVIDER_TOKEN_REASONS = new Set([
-  "ExpiredProviderToken",
   "InvalidProviderToken",
   "MissingProviderToken",
-  "TooManyProviderTokenUpdates",
+  "Forbidden",
+  "TopicDisallowed",
 ]);
 
 interface RawAPNsResult {
@@ -33,12 +28,21 @@ export async function sendToAPNs(
   request: AppleSendRequest,
   providerToken: ProviderToken,
 ): Promise<{ result: APNsResult; expiredProviderToken?: string }> {
-  let raw: RawAPNsResult;
+  let prepared: PreparedAPNsRequest;
   try {
-    raw = await performAPNsRequest(env, request, providerToken.token);
+    prepared = prepareAPNsRequest(env, request, providerToken.token);
+  } catch {
+    return { result: { kind: "internal", reason: "request_construction_failed" } };
+  }
+
+  let response: Response;
+  try {
+    response = await fetch(prepared.url, prepared.init);
   } catch {
     return { result: { kind: "unknown", reason: "network_error" } };
   }
+
+  const raw = await readAPNsResponse(response);
 
   if (raw.status >= 200 && raw.status < 300) {
     return { result: { kind: "accepted", apnsId: raw.apnsId } };
@@ -54,11 +58,14 @@ export async function sendToAPNs(
       expiredProviderToken: providerToken.token,
     };
   }
-  if (TERMINAL_DEVICE_REASONS.has(raw.reason)) {
-    return { result: { kind: "terminal", apnsId: raw.apnsId, reason: raw.reason } };
-  }
-  if (CONFIGURATION_REASONS.has(raw.reason)) {
-    return { result: { kind: "configuration", apnsId: raw.apnsId, reason: raw.reason } };
+  if (CONFIGURATION_REASONS.has(raw.reason) || raw.status === 403) {
+    return {
+      result: {
+        kind: "configuration",
+        apnsId: raw.apnsId,
+        reason: raw.reason || "provider_auth_rejected",
+      },
+    };
   }
   if (raw.status === 429) {
     return {
@@ -71,25 +78,41 @@ export async function sendToAPNs(
       },
     };
   }
+  if (raw.status >= 400 && raw.status < 500) {
+    return {
+      result: {
+        kind: "terminal",
+        apnsId: raw.apnsId,
+        reason: raw.reason || `http_${raw.status}`,
+      },
+    };
+  }
   return {
     result: {
       kind: "retryable",
       apnsId: raw.apnsId,
-      reason: raw.reason || (PROVIDER_TOKEN_REASONS.has(raw.reason) ? raw.reason : "upstream_error"),
+      reason: raw.reason || "upstream_error",
       status: 503,
       retryAfterSeconds: raw.retryAfterSeconds,
     },
   };
 }
 
-async function performAPNsRequest(
+interface PreparedAPNsRequest {
+  url: string;
+  init: RequestInit;
+}
+
+function prepareAPNsRequest(
   env: Env,
   request: AppleSendRequest,
   providerToken: string,
-): Promise<RawAPNsResult> {
+): PreparedAPNsRequest {
   const origin =
     request.environment === "production" ? env.APNS_PRODUCTION_URL : env.APNS_SANDBOX_URL;
-  const expiration = Math.floor(Date.now() / 1000) + numberSetting(env.APNS_EXPIRATION_SECONDS, "APNS_EXPIRATION_SECONDS", 1);
+  const expiration =
+    Math.floor(Date.now() / 1000) +
+    numberSetting(env.APNS_EXPIRATION_SECONDS, "APNS_EXPIRATION_SECONDS", 1);
   const timeout = numberSetting(env.APNS_TIMEOUT_MS, "APNS_TIMEOUT_MS", 1);
   const { body, pushType, priority } = buildPayload(request);
   const headers = new Headers({
@@ -100,15 +123,27 @@ async function performAPNsRequest(
     "apns-priority": priority,
     "apns-expiration": String(expiration),
   });
-  if (request.collapse_id?.trim()) headers.set("apns-collapse-id", request.collapse_id.trim());
+  if (request.collapse_id) headers.set("apns-collapse-id", request.collapse_id);
 
-  const response = await fetch(`${origin.replace(/\/$/u, "")}/3/device/${request.token}`, {
-    method: "POST",
-    headers,
-    body,
-    signal: AbortSignal.timeout(timeout),
-  });
-  const text = (await response.text()).slice(0, 16 << 10);
+  const url = new URL(`/3/device/${request.token}`, `${origin.replace(/\/$/u, "")}/`).toString();
+  return {
+    url,
+    init: {
+      method: "POST",
+      headers,
+      body,
+      signal: AbortSignal.timeout(timeout),
+    },
+  };
+}
+
+async function readAPNsResponse(response: Response): Promise<RawAPNsResult> {
+  let text = "";
+  try {
+    text = (await response.text()).slice(0, 16 << 10);
+  } catch {
+    // Response headers already prove whether APNs accepted or rejected the request.
+  }
   let reason = "";
   if (text) {
     try {

@@ -28,8 +28,10 @@ pnpm test
 pnpm dev
 ```
 
-Copy secrets into `worker/.dev.vars` for local development. Never commit that
-file. The required names are declared in `wrangler.jsonc`.
+Copy secrets into `.dev.vars` at the repository root for local development.
+Never commit that file. The required names are declared in `wrangler.jsonc`.
+Keep long-lived source credentials such as the Apple `.p8` outside the checkout;
+copy their contents into `.dev.vars` or upload them directly with Wrangler.
 
 Generate capability keys:
 
@@ -49,6 +51,15 @@ they signed have expired.
 Production secrets are uploaded with `wrangler secret put <NAME>`. Configure a
 Cloudflare WAF rate-limit rule for `POST /v1/deployments/register` before
 directing public traffic at the Worker.
+
+Send and credential-rotation requests, including idempotent replays, share a
+per-deployment rate bucket so stored-response lookups cannot be used to overload
+a Durable Object. New sends also consume a durable daily quota. Device-token
+rate limits are intentionally scoped to one deployment: making them global
+would correlate a device across independent self-hosted servers and would let
+one hostile server starve another server's notifications. Registration
+therefore relies on the WAF rule above, while deployment and quota rejections
+should be monitored from Worker observability.
 
 ## Deployment
 
@@ -76,6 +87,13 @@ deployments.
   bearer token.
 - Silo Server must use one stable idempotency key across all retries. A stale
   `dispatching` row becomes `delivery_unknown` and is never automatically sent
-  again.
+  again during the 24-hour idempotency retention window. After that window the
+  row may be deleted and a very late retry can dispatch again, so 24 hours is
+  the maximum safe automatic retry horizon.
+- Durable Object alarms clean expired idempotency, rotation, and quota state
+  even after a deployment stops sending. Cleanup drains enough bounded batches
+  per alarm to stay ahead of the configured daily push quota.
+- Administrative revocations emit a structured audit event containing only the
+  request ID and opaque deployment ID.
 - Test provider changes on Cloudflare itself; local `workerd` APNs behavior is
   not a substitute for the live HTTP/2 path.
