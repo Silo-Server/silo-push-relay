@@ -4,6 +4,7 @@ import { sendToAPNs } from "./apns";
 import type { Env } from "./env";
 import { numberSetting } from "./env";
 import { errorBody, errorResult } from "./http";
+import type { ProviderToken } from "./provider-token-object";
 import type {
   APNsResult,
   DeploymentSendInput,
@@ -20,6 +21,11 @@ interface IdempotencyRow {
   response_body: string | null;
   response_headers: string | null;
   updated_at: number;
+}
+
+interface TableInfoRow {
+  [key: string]: SqlStorageValue;
+  name: string;
 }
 
 interface MetaRow {
@@ -40,6 +46,10 @@ interface RotationRow {
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
 const CLEANUP_BATCH_SIZE = 250;
 const CLEANUP_MAX_BATCHES = 40;
+const PROVIDER_TOKEN_REFRESH_SECONDS = 50 * 60;
+
+let sharedProviderToken: ProviderToken | undefined;
+let sharedProviderTokenPromise: Promise<ProviderToken> | undefined;
 
 type BeginResult =
   | { kind: "proceed"; nonce: string; cleanupAt: number }
@@ -59,7 +69,6 @@ export interface RotationResult {
 }
 
 export class DeploymentObject extends DurableObject<Env> {
-  private providerToken?: { token: string; issuedAt: number };
   private cleanupAlarmAt?: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -79,9 +88,9 @@ export class DeploymentObject extends DurableObject<Env> {
         response_body TEXT,
         response_headers TEXT,
         created_at INTEGER NOT NULL,
-        updated_at INTEGER NOT NULL
+        updated_at INTEGER NOT NULL,
+        cleanup_at INTEGER NOT NULL
       );
-      CREATE INDEX IF NOT EXISTS idempotency_updated_at_idx ON idempotency(updated_at);
       CREATE TABLE IF NOT EXISTS rotations (
         idempotency_key TEXT PRIMARY KEY,
         previous_generation INTEGER NOT NULL,
@@ -94,6 +103,23 @@ export class DeploymentObject extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS rotations_created_at_idx ON rotations(created_at);
       INSERT OR IGNORE INTO metadata (key, value) VALUES ('status', 'active');
       INSERT OR IGNORE INTO metadata (key, value) VALUES ('generation', '1');
+    `);
+    const hasCleanupAt = this.ctx.storage.sql
+      .exec<TableInfoRow>("PRAGMA table_info(idempotency)")
+      .toArray()
+      .some((column) => column.name === "cleanup_at");
+    if (!hasCleanupAt) {
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec("ALTER TABLE idempotency ADD COLUMN cleanup_at INTEGER");
+        this.ctx.storage.sql.exec(
+          "UPDATE idempotency SET cleanup_at = updated_at + ? WHERE cleanup_at IS NULL",
+          this.retentionSeconds(),
+        );
+      });
+    }
+    this.ctx.storage.sql.exec(`
+      CREATE INDEX IF NOT EXISTS idempotency_cleanup_at_idx ON idempotency(cleanup_at);
+      DROP INDEX IF EXISTS idempotency_updated_at_idx;
     `);
     void this.ctx.blockConcurrencyWhile(async () => this.restoreCleanupAlarm());
   }
@@ -198,7 +224,9 @@ export class DeploymentObject extends DurableObject<Env> {
       try {
         const tokenStub = this.env.PROVIDER_TOKENS.getByName("apns");
         await tokenStub.invalidate(delivery.expiredProviderToken);
-        this.providerToken = undefined;
+        if (sharedProviderToken?.token === delivery.expiredProviderToken) {
+          sharedProviderToken = undefined;
+        }
         providerToken = await this.getProviderToken();
         delivery = await sendToAPNs(this.env, input.request, providerToken);
       } catch {
@@ -293,10 +321,11 @@ export class DeploymentObject extends DurableObject<Env> {
           this.ctx.storage.sql.exec(
             `UPDATE idempotency
              SET state = 'unknown', nonce = NULL, response_status = 409, response_body = ?,
-                 response_headers = '{}', updated_at = ?
+                 response_headers = '{}', updated_at = ?, cleanup_at = ?
              WHERE key = ?`,
             body,
             now,
+            now + this.retentionSeconds(),
             input.idempotencyKey,
           );
           return { kind: "response", response: { status: 409, body } };
@@ -306,10 +335,11 @@ export class DeploymentObject extends DurableObject<Env> {
         this.ctx.storage.sql.exec(
           `UPDATE idempotency
            SET state = 'dispatching', nonce = ?, response_status = NULL, response_body = NULL,
-               response_headers = NULL, updated_at = ?
+               response_headers = NULL, updated_at = ?, cleanup_at = ?
            WHERE key = ?`,
           nonce,
           now,
+          now + this.retentionSeconds(),
           input.idempotencyKey,
         );
         return { kind: "proceed", nonce, cleanupAt: now + this.retentionSeconds() };
@@ -318,13 +348,14 @@ export class DeploymentObject extends DurableObject<Env> {
       const nonce = crypto.randomUUID();
       this.ctx.storage.sql.exec(
         `INSERT INTO idempotency
-         (key, payload_hash, state, nonce, created_at, updated_at)
-         VALUES (?, ?, 'dispatching', ?, ?, ?)`,
+         (key, payload_hash, state, nonce, created_at, updated_at, cleanup_at)
+         VALUES (?, ?, 'dispatching', ?, ?, ?, ?)`,
         input.idempotencyKey,
         input.payloadHash,
         nonce,
         now,
         now,
+        now + this.retentionSeconds(),
       );
       return { kind: "proceed", nonce, cleanupAt: now + this.retentionSeconds() };
     });
@@ -423,21 +454,35 @@ export class DeploymentObject extends DurableObject<Env> {
     this.ctx.storage.sql.exec(
       `UPDATE idempotency
        SET state = 'retryable', nonce = NULL, response_status = NULL, response_body = NULL,
-           response_headers = NULL, updated_at = ?
+           response_headers = NULL, updated_at = ?, cleanup_at = ?
        WHERE key = ? AND state = 'dispatching' AND nonce = ?`,
       now,
+      now + this.retentionSeconds(),
       key,
       nonce,
     );
   }
 
-  private async getProviderToken(): Promise<{ token: string; issuedAt: number }> {
+  private async getProviderToken(): Promise<ProviderToken> {
     const now = Math.floor(Date.now() / 1000);
-    if (this.providerToken && now - this.providerToken.issuedAt < 50 * 60) {
-      return this.providerToken;
+    if (
+      sharedProviderToken &&
+      now - sharedProviderToken.issuedAt < PROVIDER_TOKEN_REFRESH_SECONDS
+    ) {
+      return sharedProviderToken;
     }
-    this.providerToken = await this.env.PROVIDER_TOKENS.getByName("apns").getToken();
-    return this.providerToken;
+    if (sharedProviderTokenPromise) return sharedProviderTokenPromise;
+
+    const promise = this.env.PROVIDER_TOKENS.getByName("apns").getToken().then((token) => {
+      sharedProviderToken = token;
+      return token;
+    });
+    sharedProviderTokenPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (sharedProviderTokenPromise === promise) sharedProviderTokenPromise = undefined;
+    }
   }
 
   private metadata(key: string): string {
@@ -499,15 +544,16 @@ export class DeploymentObject extends DurableObject<Env> {
 
   private nextCleanupAt(): number | undefined {
     const retention = this.retentionSeconds();
-    const idempotencyUpdatedAt = this.ctx.storage.sql
-      .exec<{ value: number | null }>("SELECT MIN(updated_at) AS value FROM idempotency")
+    const idempotencyCleanupAt = this.ctx.storage.sql
+      .exec<{ value: number | null }>("SELECT MIN(cleanup_at) AS value FROM idempotency")
       .one().value;
     const rotationCreatedAt = this.ctx.storage.sql
       .exec<{ value: number | null }>("SELECT MIN(created_at) AS value FROM rotations")
       .one().value;
-    const candidates = [idempotencyUpdatedAt, rotationCreatedAt]
-      .filter((value): value is number => value !== null)
-      .map((value) => value + retention);
+    const candidates = [
+      idempotencyCleanupAt,
+      rotationCreatedAt === null ? null : rotationCreatedAt + retention,
+    ].filter((value): value is number => value !== null);
     return candidates.length > 0 ? Math.min(...candidates) : undefined;
   }
 
@@ -525,10 +571,10 @@ export class DeploymentObject extends DurableObject<Env> {
       `DELETE FROM idempotency
        WHERE key IN (
          SELECT key FROM idempotency
-         WHERE updated_at < ?
+         WHERE cleanup_at < ?
          LIMIT ${CLEANUP_BATCH_SIZE}
        )`,
-      now - retention,
+      now,
     );
     this.deleteInBatches(
       `DELETE FROM rotations
