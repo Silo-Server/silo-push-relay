@@ -21,8 +21,11 @@ pnpm run deploy
   per-device abuse throttling; there is no daily usage quota.
 - `DeploymentObject` owns per-deployment rotation, revocation, and fail-closed
   idempotency in Durable Object SQLite.
-- `ProviderTokenObject` signs and caches APNs provider JWTs.
-- `src/apns.ts` builds fixed content-private payloads and maps APNs responses.
+- `ProviderTokenObject` caches upstream credentials per provider instance:
+  `"apns"` signs APNs provider JWTs, `"fcm"` exchanges a service-account
+  assertion for a Google OAuth access token.
+- `src/apns.ts` and `src/fcm.ts` build fixed content-private payloads and map
+  upstream responses into one shared result shape.
 - Production is deployed at `push.siloserver.org`; `workers.dev` and preview
   URLs are disabled in `wrangler.jsonc`.
 

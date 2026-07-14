@@ -2,6 +2,7 @@ import { allowedTopics, numberSetting, type Env } from "./env";
 import { configurationError } from "./config";
 import {
   canonicalAppleHash,
+  canonicalFcmHash,
   capabilityDisplayPrefix,
   CapabilityError,
   constantTimeSecretEqual,
@@ -19,7 +20,7 @@ import {
 } from "./http";
 import { clientRateLimitKey, enforceRateLimit } from "./rate-limit";
 import type { CapabilityClaims } from "./types";
-import { APPLE_FIELDS, validateAppleRequest } from "./validation";
+import { APPLE_FIELDS, FCM_FIELDS, validateAppleRequest, validateFcmRequest } from "./validation";
 
 export { DeploymentObject } from "./deployment-object";
 export { ProviderTokenObject } from "./provider-token-object";
@@ -72,14 +73,7 @@ export default {
         return handleAppleSend(request, env, requestId);
       }
       if (request.method === "POST" && url.pathname === "/v1/fcm/send") {
-        const authorized = await requestCapability(request, env, requestId, "apns:send");
-        if (authorized instanceof Response) return authorized;
-        return errorResponse(
-          501,
-          "not_implemented",
-          "FCM upstream delivery is not implemented",
-          requestId,
-        );
+        return handleFcmSend(request, env, requestId);
       }
       return errorResponse(404, "not_found", "not found", requestId);
     } catch (error) {
@@ -228,18 +222,8 @@ async function handleAppleSend(request: Request, env: Env, requestId: string): P
   const deploymentLimited = await limitDeployment(env, claims.sub, requestId);
   if (deploymentLimited) return deploymentLimited;
 
-  const idempotencyKey = request.headers.get("idempotency-key")?.trim() ?? "";
-  if (!idempotencyKey) {
-    return errorResponse(
-      400,
-      "missing_idempotency_key",
-      "Idempotency-Key header is required",
-      requestId,
-    );
-  }
-  if (idempotencyKey.length > 255) {
-    return errorResponse(400, "invalid_field", "Idempotency-Key is too long", requestId);
-  }
+  const idempotencyKey = sendIdempotencyKey(request, requestId);
+  if (idempotencyKey instanceof Response) return idempotencyKey;
 
   const body = await strictJSON(request, APPLE_FIELDS, requestId);
   if (body instanceof Response) return body;
@@ -270,6 +254,7 @@ async function handleAppleSend(request: Request, env: Env, requestId: string): P
   });
   if (deviceLimited) return deviceLimited;
   const result = await env.DEPLOYMENTS.getByName(claims.sub).send({
+    provider: "apple",
     generation: claims.ver,
     idempotencyKey,
     payloadHash,
@@ -277,6 +262,69 @@ async function handleAppleSend(request: Request, env: Env, requestId: string): P
     request: appleRequest,
   });
   return responseFromResult(result);
+}
+
+async function handleFcmSend(request: Request, env: Env, requestId: string): Promise<Response> {
+  const claims = await verifyRequestToken(request, env, requestId);
+  if (claims instanceof Response) return claims;
+  // Capabilities issued before fcm:send existed carry only apns:send. Those
+  // deployments may deliver to Android devices without re-registering.
+  if (!claims.scope.includes("fcm:send") && !claims.scope.includes("apns:send")) {
+    return errorResponse(401, "unauthorized", "unauthorized", requestId);
+  }
+  const deploymentLimited = await limitDeployment(env, claims.sub, requestId);
+  if (deploymentLimited) return deploymentLimited;
+
+  const idempotencyKey = sendIdempotencyKey(request, requestId);
+  if (idempotencyKey instanceof Response) return idempotencyKey;
+
+  const body = await strictJSON(request, FCM_FIELDS, requestId);
+  if (body instanceof Response) return body;
+  const fcmRequest = validateFcmRequest(body, requestId);
+  if (fcmRequest instanceof Response) return fcmRequest;
+  // No topic allowlist: the relay only holds credentials for its own Firebase
+  // project, so the project itself is the delivery boundary.
+
+  const [payloadHash, tokenHash] = await Promise.all([
+    canonicalFcmHash(fcmRequest),
+    sha256(fcmRequest.token),
+  ]);
+  const deviceLimited = await enforceRateLimit({
+    limiter: env.DEVICE_RATE_LIMITER,
+    key: `${claims.sub}:${tokenHash}`,
+    kind: "device",
+    requestId,
+    code: "device_rate_limited",
+    message: "device request rate exceeded",
+    retryAfterSeconds: 60,
+    deploymentId: claims.sub,
+  });
+  if (deviceLimited) return deviceLimited;
+  const result = await env.DEPLOYMENTS.getByName(claims.sub).send({
+    provider: "fcm",
+    generation: claims.ver,
+    idempotencyKey,
+    payloadHash,
+    requestId,
+    request: fcmRequest,
+  });
+  return responseFromResult(result);
+}
+
+function sendIdempotencyKey(request: Request, requestId: string): string | Response {
+  const idempotencyKey = request.headers.get("idempotency-key")?.trim() ?? "";
+  if (!idempotencyKey) {
+    return errorResponse(
+      400,
+      "missing_idempotency_key",
+      "Idempotency-Key header is required",
+      requestId,
+    );
+  }
+  if (idempotencyKey.length > 255) {
+    return errorResponse(400, "invalid_field", "Idempotency-Key is too long", requestId);
+  }
+  return idempotencyKey;
 }
 
 async function requestCapability(

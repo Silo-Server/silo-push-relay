@@ -1,7 +1,7 @@
 import type { Env } from "./env";
 import { numberSetting } from "./env";
 import type { ProviderToken } from "./provider-token-object";
-import type { APNsResult, AppleSendRequest } from "./types";
+import type { AppleSendRequest, ProviderSendResult } from "./types";
 
 // Apple currently documents BadEnvironmentKeyIdInToken. APNs has also returned
 // the older BadEnvironmentKeyInToken spelling in production, so recognize both.
@@ -27,7 +27,7 @@ export async function sendToAPNs(
   env: Env,
   request: AppleSendRequest,
   providerToken: ProviderToken,
-): Promise<{ result: APNsResult; expiredProviderToken?: string }> {
+): Promise<{ result: ProviderSendResult; expiredProviderToken?: string }> {
   let prepared: PreparedAPNsRequest;
   try {
     prepared = prepareAPNsRequest(env, request, providerToken.token);
@@ -45,13 +45,13 @@ export async function sendToAPNs(
   const raw = await readAPNsResponse(response);
 
   if (raw.status >= 200 && raw.status < 300) {
-    return { result: { kind: "accepted", apnsId: raw.apnsId } };
+    return { result: { kind: "accepted", messageId: raw.apnsId } };
   }
   if (raw.reason === "ExpiredProviderToken") {
     return {
       result: {
         kind: "retryable",
-        apnsId: raw.apnsId,
+        messageId: raw.apnsId,
         reason: raw.reason,
         status: 503,
       },
@@ -62,7 +62,7 @@ export async function sendToAPNs(
     return {
       result: {
         kind: "configuration",
-        apnsId: raw.apnsId,
+        messageId: raw.apnsId,
         reason: raw.reason || "provider_auth_rejected",
       },
     };
@@ -71,7 +71,7 @@ export async function sendToAPNs(
     return {
       result: {
         kind: "retryable",
-        apnsId: raw.apnsId,
+        messageId: raw.apnsId,
         reason: raw.reason || "TooManyRequests",
         status: 429,
         retryAfterSeconds: raw.retryAfterSeconds,
@@ -82,7 +82,7 @@ export async function sendToAPNs(
     return {
       result: {
         kind: "terminal",
-        apnsId: raw.apnsId,
+        messageId: raw.apnsId,
         reason: raw.reason || `http_${raw.status}`,
       },
     };
@@ -90,7 +90,7 @@ export async function sendToAPNs(
   return {
     result: {
       kind: "retryable",
-      apnsId: raw.apnsId,
+      messageId: raw.apnsId,
       reason: raw.reason || "upstream_error",
       status: 503,
       retryAfterSeconds: raw.retryAfterSeconds,
@@ -181,7 +181,7 @@ function buildPayload(request: AppleSendRequest): {
   return { body: JSON.stringify(payload), pushType: "alert", priority: "10" };
 }
 
-function parseRetryAfter(value: string | null): number | undefined {
+export function parseRetryAfter(value: string | null): number | undefined {
   if (!value) return undefined;
   const seconds = Number(value);
   if (Number.isFinite(seconds) && seconds > 0) return Math.ceil(seconds);

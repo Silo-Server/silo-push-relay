@@ -3,11 +3,13 @@ import { DurableObject } from "cloudflare:workers";
 import { sendToAPNs } from "./apns";
 import type { Env } from "./env";
 import { numberSetting } from "./env";
+import { sendToFCM } from "./fcm";
 import { errorBody, errorResult } from "./http";
 import type { ProviderToken } from "./provider-token-object";
 import type {
-  APNsResult,
   DeploymentSendInput,
+  ProviderSendResult,
+  PushProvider,
   RelayResult,
   RotationMetadata,
 } from "./types";
@@ -48,8 +50,21 @@ const CLEANUP_BATCH_SIZE = 250;
 const CLEANUP_MAX_BATCHES = 40;
 const PROVIDER_TOKEN_REFRESH_SECONDS = 50 * 60;
 
-let sharedProviderToken: ProviderToken | undefined;
-let sharedProviderTokenPromise: Promise<ProviderToken> | undefined;
+const sharedProviderTokens = new Map<string, ProviderToken>();
+const sharedProviderTokenPromises = new Map<string, Promise<ProviderToken>>();
+
+interface UpstreamLabels {
+  name: string;
+  tokenName: string;
+  idField: string;
+  rejectedCode: string;
+}
+
+function upstreamLabels(provider: PushProvider): UpstreamLabels {
+  return provider === "fcm"
+    ? { name: "FCM", tokenName: "fcm", idField: "fcm_message_id", rejectedCode: "fcm_rejected" }
+    : { name: "APNs", tokenName: "apns", idField: "apns_id", rejectedCode: "apns_rejected" };
+}
 
 type BeginResult =
   | { kind: "proceed"; nonce: string; cleanupAt: number }
@@ -211,30 +226,50 @@ export class DeploymentObject extends DurableObject<Env> {
     if (begin.kind === "response") return begin.response;
     this.scheduleCleanupAt(begin.cleanupAt);
 
+    const upstream = upstreamLabels(input.provider);
     let providerToken;
     try {
-      providerToken = await this.getProviderToken();
+      providerToken = await this.getProviderToken(upstream.tokenName);
     } catch {
       this.markRetryable(input.idempotencyKey, begin.nonce);
-      return errorResult(503, "upstream_unavailable", "APNs authentication is unavailable", input.requestId);
+      return errorResult(
+        503,
+        "upstream_unavailable",
+        `${upstream.name} authentication is unavailable`,
+        input.requestId,
+      );
     }
 
-    let delivery = await sendToAPNs(this.env, input.request, providerToken);
+    let delivery = await this.dispatch(input, providerToken);
     if (delivery.expiredProviderToken) {
       try {
-        const tokenStub = this.env.PROVIDER_TOKENS.getByName("apns");
+        const tokenStub = this.env.PROVIDER_TOKENS.getByName(upstream.tokenName);
         await tokenStub.invalidate(delivery.expiredProviderToken);
-        if (sharedProviderToken?.token === delivery.expiredProviderToken) {
-          sharedProviderToken = undefined;
+        if (sharedProviderTokens.get(upstream.tokenName)?.token === delivery.expiredProviderToken) {
+          sharedProviderTokens.delete(upstream.tokenName);
         }
-        providerToken = await this.getProviderToken();
-        delivery = await sendToAPNs(this.env, input.request, providerToken);
+        providerToken = await this.getProviderToken(upstream.tokenName);
+        delivery = await this.dispatch(input, providerToken);
       } catch {
         this.markRetryable(input.idempotencyKey, begin.nonce);
-        return errorResult(503, "upstream_unavailable", "APNs authentication is unavailable", input.requestId);
+        return errorResult(
+          503,
+          "upstream_unavailable",
+          `${upstream.name} authentication is unavailable`,
+          input.requestId,
+        );
       }
     }
     return this.complete(input, begin.nonce, delivery.result);
+  }
+
+  private dispatch(
+    input: DeploymentSendInput,
+    providerToken: ProviderToken,
+  ): Promise<{ result: ProviderSendResult; expiredProviderToken?: string }> {
+    return input.provider === "fcm"
+      ? sendToFCM(this.env, input.request, providerToken)
+      : sendToAPNs(this.env, input.request, providerToken);
   }
 
   private begin(input: DeploymentSendInput): BeginResult {
@@ -290,7 +325,7 @@ export class DeploymentObject extends DurableObject<Env> {
                 : errorResult(
                     409,
                     "delivery_unknown",
-                    "delivery may have reached APNs; it will not be sent again",
+                    `delivery may have reached ${upstreamLabels(input.provider).name}; it will not be sent again`,
                     input.requestId,
                   ),
           };
@@ -315,7 +350,7 @@ export class DeploymentObject extends DurableObject<Env> {
           }
           const body = errorBody(
             "delivery_unknown",
-            "delivery may have reached APNs; it will not be sent again",
+            `delivery may have reached ${upstreamLabels(input.provider).name}; it will not be sent again`,
             input.requestId,
           );
           this.ctx.storage.sql.exec(
@@ -361,13 +396,18 @@ export class DeploymentObject extends DurableObject<Env> {
     });
   }
 
-  private complete(input: DeploymentSendInput, nonce: string, result: APNsResult): RelayResult {
+  private complete(
+    input: DeploymentSendInput,
+    nonce: string,
+    result: ProviderSendResult,
+  ): RelayResult {
+    const upstream = upstreamLabels(input.provider);
     const now = Math.floor(Date.now() / 1000);
     if (result.kind === "unknown") {
       const response = errorResult(
         409,
         "delivery_unknown",
-        "delivery may have reached APNs; it will not be sent again",
+        `delivery may have reached ${upstream.name}; it will not be sent again`,
         input.requestId,
       );
       this.storeFinal(input.idempotencyKey, nonce, "unknown", response, now);
@@ -379,10 +419,12 @@ export class DeploymentObject extends DurableObject<Env> {
       const response = errorResult(
         status,
         status === 429 ? "upstream_rate_limited" : "upstream_unavailable",
-        status === 429 ? "APNs upstream rate limited the request" : "APNs upstream unavailable",
+        status === 429
+          ? `${upstream.name} upstream rate limited the request`
+          : `${upstream.name} upstream unavailable`,
         input.requestId,
         result.retryAfterSeconds ? { "retry-after": String(result.retryAfterSeconds) } : undefined,
-        result.apnsId ? { apns_id: result.apnsId } : undefined,
+        result.messageId ? { [upstream.idField]: result.messageId } : undefined,
       );
       return response;
     }
@@ -398,11 +440,11 @@ export class DeploymentObject extends DurableObject<Env> {
     if (result.kind === "terminal") {
       const response = errorResult(
         422,
-        "apns_rejected",
-        `APNs rejected the notification: ${result.reason}`,
+        upstream.rejectedCode,
+        `${upstream.name} rejected the notification: ${result.reason}`,
         input.requestId,
         undefined,
-        result.apnsId ? { apns_id: result.apnsId } : undefined,
+        result.messageId ? { [upstream.idField]: result.messageId } : undefined,
       );
       this.storeFinal(input.idempotencyKey, nonce, "done", response, now);
       return response;
@@ -411,10 +453,10 @@ export class DeploymentObject extends DurableObject<Env> {
       const response = errorResult(
         502,
         "upstream_auth_error",
-        `APNs authentication rejected: ${result.reason}`,
+        `${upstream.name} authentication rejected: ${result.reason}`,
         input.requestId,
         { "retry-after": "60" },
-        result.apnsId ? { apns_id: result.apnsId } : undefined,
+        result.messageId ? { [upstream.idField]: result.messageId } : undefined,
       );
       this.markRetryable(input.idempotencyKey, nonce, now);
       return response;
@@ -422,7 +464,11 @@ export class DeploymentObject extends DurableObject<Env> {
 
     const response: RelayResult = {
       status: 200,
-      body: JSON.stringify({ request_id: input.requestId, apns_id: result.apnsId, status: "accepted" }),
+      body: JSON.stringify({
+        request_id: input.requestId,
+        [upstream.idField]: result.messageId,
+        status: "accepted",
+      }),
     };
     this.storeFinal(input.idempotencyKey, nonce, "done", response, now);
     return response;
@@ -463,25 +509,26 @@ export class DeploymentObject extends DurableObject<Env> {
     );
   }
 
-  private async getProviderToken(): Promise<ProviderToken> {
+  private async getProviderToken(tokenName: string): Promise<ProviderToken> {
     const now = Math.floor(Date.now() / 1000);
-    if (
-      sharedProviderToken &&
-      now - sharedProviderToken.issuedAt < PROVIDER_TOKEN_REFRESH_SECONDS
-    ) {
-      return sharedProviderToken;
+    const shared = sharedProviderTokens.get(tokenName);
+    if (shared && now - shared.issuedAt < PROVIDER_TOKEN_REFRESH_SECONDS) {
+      return shared;
     }
-    if (sharedProviderTokenPromise) return sharedProviderTokenPromise;
+    const pending = sharedProviderTokenPromises.get(tokenName);
+    if (pending) return pending;
 
-    const promise = this.env.PROVIDER_TOKENS.getByName("apns").getToken().then((token) => {
-      sharedProviderToken = token;
+    const promise = this.env.PROVIDER_TOKENS.getByName(tokenName).getToken().then((token) => {
+      sharedProviderTokens.set(tokenName, token);
       return token;
     });
-    sharedProviderTokenPromise = promise;
+    sharedProviderTokenPromises.set(tokenName, promise);
     try {
       return await promise;
     } finally {
-      if (sharedProviderTokenPromise === promise) sharedProviderTokenPromise = undefined;
+      if (sharedProviderTokenPromises.get(tokenName) === promise) {
+        sharedProviderTokenPromises.delete(tokenName);
+      }
     }
   }
 

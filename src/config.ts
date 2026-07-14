@@ -10,6 +10,11 @@ export function configurationError(env: Env): string | undefined {
     ["APNS_TEAM_ID", env.APNS_TEAM_ID],
     ["APNS_KEY_ID", env.APNS_KEY_ID],
     ["APNS_PRIVATE_KEY_PEM", env.APNS_PRIVATE_KEY_PEM],
+    ["FCM_PROJECT_ID", env.FCM_PROJECT_ID],
+    ["FCM_CLIENT_EMAIL", env.FCM_CLIENT_EMAIL],
+    ["FCM_PRIVATE_KEY_PEM", env.FCM_PRIVATE_KEY_PEM],
+    ["FCM_SEND_URL", env.FCM_SEND_URL],
+    ["FCM_TOKEN_URL", env.FCM_TOKEN_URL],
     ["ADMIN_TOKEN", env.ADMIN_TOKEN],
   ];
   for (const [name, value] of required) {
@@ -25,6 +30,8 @@ export function configurationError(env: Env): string | undefined {
     numberSetting(env.CAPABILITY_RENEW_GRACE_SECONDS, "CAPABILITY_RENEW_GRACE_SECONDS", 0);
     numberSetting(env.APNS_EXPIRATION_SECONDS, "APNS_EXPIRATION_SECONDS", 1);
     numberSetting(env.APNS_TIMEOUT_MS, "APNS_TIMEOUT_MS", 1);
+    numberSetting(env.FCM_TTL_SECONDS, "FCM_TTL_SECONDS", 1);
+    numberSetting(env.FCM_TIMEOUT_MS, "FCM_TIMEOUT_MS", 1);
     numberSetting(
       env.IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS,
       "IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS",

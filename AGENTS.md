@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is the production Cloudflare Worker behind `push.siloserver.org`. Code lives in `src/`: `index.ts` defines routes, `deployment-object.ts` owns per-deployment state and quotas, and `provider-token-object.ts` signs APNs provider tokens. Supporting logic is split across `apns.ts`, `crypto.ts`, and `validation.ts`. Worker configuration and Durable Object migrations are in `wrangler.jsonc`. Integration tests and fixtures live in `test/` and `vitest.config.mjs`. The retired Go service remains on `legacy/go-relay`.
+This is the production Cloudflare Worker behind `push.siloserver.org`. Code lives in `src/`: `index.ts` defines routes, `deployment-object.ts` owns per-deployment state and quotas, and `provider-token-object.ts` signs APNs provider tokens and mints Google OAuth access tokens for FCM. Supporting logic is split across `apns.ts`, `fcm.ts`, `crypto.ts`, and `validation.ts`. Worker configuration and Durable Object migrations are in `wrangler.jsonc`. Integration tests and fixtures live in `test/` and `vitest.config.mjs`. The retired Go service remains on `legacy/go-relay`.
 
 ## Build, Test, and Development Commands
 

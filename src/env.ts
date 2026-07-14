@@ -27,6 +27,14 @@ export interface Env {
   APNS_EXPIRATION_SECONDS: string;
   APNS_TIMEOUT_MS: string;
 
+  FCM_PROJECT_ID: string;
+  FCM_CLIENT_EMAIL: string;
+  FCM_PRIVATE_KEY_PEM: string;
+  FCM_SEND_URL: string;
+  FCM_TOKEN_URL: string;
+  FCM_TTL_SECONDS: string;
+  FCM_TIMEOUT_MS: string;
+
   IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS: string;
   IDEMPOTENCY_RETENTION_SECONDS: string;
 

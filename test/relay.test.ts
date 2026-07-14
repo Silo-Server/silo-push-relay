@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { sendToAPNs } from "../src/apns";
 import { canonicalAppleHash, newCapabilityClaims, signCapability } from "../src/crypto";
-import type { AppleSendRequest } from "../src/types";
+import type { AppleSendRequest, FcmSendRequest } from "../src/types";
 
 const ACCEPT_TOKEN = "a".repeat(64);
 const TERMINAL_TOKEN = "b".repeat(64);
@@ -11,12 +11,19 @@ const RETRY_TOKEN = "c".repeat(64);
 const CONFIGURATION_TOKEN = "d".repeat(64);
 const EXPIRED_PROVIDER_TOKEN = "e".repeat(64);
 
+const FCM_ACCEPT_TOKEN = "A".repeat(140);
+const FCM_TERMINAL_TOKEN = "B".repeat(140);
+const FCM_RETRY_TOKEN = "C".repeat(140);
+const FCM_CONFIGURATION_TOKEN = "D".repeat(140);
+const FCM_EXPIRED_AUTH_TOKEN = "E".repeat(140);
+
 interface ErrorEnvelope {
   error: {
     code: string;
     message: string;
     request_id: string;
     apns_id?: string;
+    fcm_message_id?: string;
   };
 }
 
@@ -60,6 +67,32 @@ async function send(
   body: AppleSendRequest,
 ): Promise<Response> {
   return SELF.fetch("https://relay.test/v1/apple/send", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${capability}`,
+      "content-type": "application/json",
+      "idempotency-key": idempotencyKey,
+    },
+    body: JSON.stringify(body),
+  });
+}
+
+function fcmRequest(token = FCM_ACCEPT_TOKEN, deliveryId = crypto.randomUUID()): FcmSendRequest {
+  return {
+    token,
+    mode: "private_alert",
+    server_device_id: crypto.randomUUID(),
+    delivery_id: deliveryId,
+    collapse_id: deliveryId,
+  };
+}
+
+async function sendFcm(
+  capability: string,
+  idempotencyKey: string,
+  body: unknown,
+): Promise<Response> {
+  return SELF.fetch("https://relay.test/v1/fcm/send", {
     method: "POST",
     headers: {
       authorization: `Bearer ${capability}`,
@@ -345,7 +378,7 @@ describe("relay worker", () => {
       });
       expect(delivery.result).toEqual({
         kind: "configuration",
-        apnsId: "legacy-configuration-apns-id",
+        messageId: "legacy-configuration-apns-id",
         reason: "BadEnvironmentKeyInToken",
       });
     } finally {
@@ -368,7 +401,7 @@ describe("relay worker", () => {
         });
         expect(delivery.result).toEqual({
           kind: "configuration",
-          apnsId: `${reason}-apns-id`,
+          messageId: `${reason}-apns-id`,
           reason,
         });
       } finally {
@@ -386,7 +419,7 @@ describe("relay worker", () => {
       });
       expect(delivery.result).toEqual({
         kind: "configuration",
-        apnsId: "",
+        messageId: "",
         reason: "provider_auth_rejected",
       });
     } finally {
@@ -406,7 +439,7 @@ describe("relay worker", () => {
       });
       expect(delivery.result).toEqual({
         kind: "terminal",
-        apnsId: "bad-priority-apns-id",
+        messageId: "bad-priority-apns-id",
         reason: "BadPriority",
       });
     } finally {
@@ -440,7 +473,7 @@ describe("relay worker", () => {
       });
       expect(delivery.result).toEqual({
         kind: "retryable",
-        apnsId: "",
+        messageId: "",
         reason: "upstream_error",
         status: 503,
         retryAfterSeconds: undefined,
@@ -853,5 +886,111 @@ describe("relay worker", () => {
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining(registration.deployment_id));
     logSpy.mockRestore();
     expect((await send(registration.api_key, crypto.randomUUID(), appleRequest())).status).toBe(401);
+  });
+
+  it("delivers FCM messages once and replays the stored response", async () => {
+    const registration = await register();
+    const key = crypto.randomUUID();
+    const body = fcmRequest();
+    const first = await sendFcm(registration.api_key, key, { ...body });
+    const firstText = await first.text();
+    expect(first.status).toBe(200);
+    const parsed = JSON.parse(firstText) as { status: string; fcm_message_id: string };
+    expect(parsed.status).toBe("accepted");
+    expect(parsed.fcm_message_id).toMatch(/^accepted-A{8}-\d+$/u);
+
+    const replay = await sendFcm(registration.api_key, key, { ...body });
+    expect(replay.status).toBe(200);
+    expect(await replay.text()).toBe(firstText);
+  });
+
+  it("rejects FCM requests outside the privacy contract", async () => {
+    const registration = await register();
+    const withTopic = await sendFcm(registration.api_key, crypto.randomUUID(), {
+      ...fcmRequest(),
+      topic: "org.siloserver.silo",
+    });
+    expect(withTopic.status).toBe(400);
+    expect((await withTopic.json<ErrorEnvelope>()).error.code).toBe("unexpected_field");
+
+    const badToken = await sendFcm(registration.api_key, crypto.randomUUID(), {
+      ...fcmRequest(),
+      token: "too-short",
+    });
+    expect(badToken.status).toBe(400);
+    expect((await badToken.json<ErrorEnvelope>()).error.code).toBe("invalid_token");
+  });
+
+  it("stores terminal FCM unregistered-device responses", async () => {
+    const registration = await register();
+    const key = crypto.randomUUID();
+    const body = fcmRequest(FCM_TERMINAL_TOKEN);
+    const first = await sendFcm(registration.api_key, key, { ...body });
+    const firstText = await first.text();
+    expect(first.status).toBe(422);
+    const parsed = JSON.parse(firstText) as ErrorEnvelope;
+    expect(parsed.error.code).toBe("fcm_rejected");
+    expect(parsed.error.message).toContain("UNREGISTERED");
+    const replay = await sendFcm(registration.api_key, key, { ...body });
+    expect(replay.status).toBe(422);
+    expect(await replay.text()).toBe(firstText);
+  });
+
+  it("allows the same key to retry a definitive FCM 5xx", async () => {
+    const registration = await register();
+    const key = crypto.randomUUID();
+    const body = fcmRequest(FCM_RETRY_TOKEN);
+    const first = await sendFcm(registration.api_key, key, { ...body });
+    expect(first.status).toBe(503);
+    expect((await first.json<ErrorEnvelope>()).error.code).toBe("upstream_unavailable");
+    const second = await sendFcm(registration.api_key, key, { ...body });
+    expect(second.status).toBe(200);
+  });
+
+  it("classifies FCM sender mismatches as configuration failures", async () => {
+    const registration = await register();
+    const response = await sendFcm(registration.api_key, crypto.randomUUID(), {
+      ...fcmRequest(FCM_CONFIGURATION_TOKEN),
+    });
+    expect(response.status).toBe(502);
+    const parsed = await response.json<ErrorEnvelope>();
+    expect(parsed.error.code).toBe("upstream_auth_error");
+    expect(parsed.error.message).toContain("SENDER_ID_MISMATCH");
+    expect(response.headers.get("retry-after")).toBe("60");
+  });
+
+  it("refreshes a rejected Google access token and resends once", async () => {
+    const registration = await register();
+    const response = await sendFcm(registration.api_key, crypto.randomUUID(), {
+      ...fcmRequest(FCM_EXPIRED_AUTH_TOKEN),
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json<{ status: string; fcm_message_id: string }>()).toEqual({
+      status: "accepted",
+      fcm_message_id: `accepted-${FCM_EXPIRED_AUTH_TOKEN.slice(0, 8)}-2`,
+      request_id: expect.any(String),
+    });
+  });
+
+  it("keeps FCM sends compatible with capabilities issued before the fcm:send scope", async () => {
+    const registration = await register();
+    const claims = newCapabilityClaims(env, registration.deployment_id, 1);
+    claims.scope = claims.scope.filter((scope) => scope !== "fcm:send");
+    const legacyCapability = await signCapability(env, claims);
+    const response = await sendFcm(legacyCapability, crypto.randomUUID(), fcmRequest());
+    expect(response.status).toBe(200);
+  });
+
+  it("shares device rate limits across a hashed FCM token", async () => {
+    const registration = await register();
+    const deviceToken = `${"F".repeat(139)}1`;
+    for (let delivery = 0; delivery < 30; delivery += 1) {
+      expect(
+        (await sendFcm(registration.api_key, crypto.randomUUID(), fcmRequest(deviceToken))).status,
+      ).toBe(200);
+    }
+    const limited = await sendFcm(registration.api_key, crypto.randomUUID(), fcmRequest(deviceToken));
+    expect(limited.status).toBe(429);
+    expect((await limited.json<ErrorEnvelope>()).error.code).toBe("device_rate_limited");
   });
 });

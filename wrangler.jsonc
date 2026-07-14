@@ -26,6 +26,11 @@
     "APNS_SANDBOX_URL": "https://api.sandbox.push.apple.com",
     "APNS_EXPIRATION_SECONDS": "900",
     "APNS_TIMEOUT_MS": "10000",
+    "FCM_PROJECT_ID": "siloandroid-a60b9",
+    "FCM_SEND_URL": "https://fcm.googleapis.com",
+    "FCM_TOKEN_URL": "https://oauth2.googleapis.com/token",
+    "FCM_TTL_SECONDS": "900",
+    "FCM_TIMEOUT_MS": "10000",
     "IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS": "60",
     "IDEMPOTENCY_RETENTION_SECONDS": "86400"
   },
@@ -78,6 +83,8 @@
       "APNS_TEAM_ID",
       "APNS_KEY_ID",
       "APNS_PRIVATE_KEY_PEM",
+      "FCM_CLIENT_EMAIL",
+      "FCM_PRIVATE_KEY_PEM",
       "ADMIN_TOKEN"
     ]
   },

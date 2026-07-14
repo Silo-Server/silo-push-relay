@@ -21,13 +21,26 @@ export interface AppleSendRequest {
   collapse_id?: string;
 }
 
-export interface DeploymentSendInput {
+export interface FcmSendRequest {
+  token: string;
+  mode: "private_alert" | "background_wake";
+  server_device_id: string;
+  delivery_id: string;
+  collapse_id?: string;
+}
+
+export type PushProvider = "apple" | "fcm";
+
+interface DeploymentSendBase {
   generation: number;
   idempotencyKey: string;
   payloadHash: string;
   requestId: string;
-  request: AppleSendRequest;
 }
+
+export type DeploymentSendInput =
+  | (DeploymentSendBase & { provider: "apple"; request: AppleSendRequest })
+  | (DeploymentSendBase & { provider: "fcm"; request: FcmSendRequest });
 
 export interface RelayResult {
   status: number;
@@ -42,13 +55,13 @@ export interface RotationMetadata {
   jti: string;
 }
 
-export type APNsResult =
-  | { kind: "accepted"; apnsId: string }
-  | { kind: "terminal"; apnsId: string; reason: string }
-  | { kind: "configuration"; apnsId: string; reason: string }
+export type ProviderSendResult =
+  | { kind: "accepted"; messageId: string }
+  | { kind: "terminal"; messageId: string; reason: string }
+  | { kind: "configuration"; messageId: string; reason: string }
   | {
       kind: "retryable";
-      apnsId: string;
+      messageId: string;
       reason: string;
       status: number;
       retryAfterSeconds?: number;

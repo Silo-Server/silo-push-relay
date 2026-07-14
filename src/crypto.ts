@@ -1,11 +1,12 @@
 import { numberSetting, type Env } from "./env";
-import type { AppleSendRequest, CapabilityClaims } from "./types";
+import type { AppleSendRequest, CapabilityClaims, FcmSendRequest } from "./types";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const CAPABILITY_TYPE = "silo-relay-cap+jwt";
 const CAPABILITY_SCOPE = [
   "apns:send",
+  "fcm:send",
   "deployment:renew",
   "deployment:rotate",
   "deployment:revoke",
@@ -204,6 +205,19 @@ export async function canonicalAppleHash(request: AppleSendRequest): Promise<str
     request.server_device_id,
     request.delivery_id,
     request.badge === undefined ? "" : String(request.badge),
+    request.collapse_id ?? "",
+    tokenHash,
+  ];
+  return sha256(values.map((value) => `${value.length}:${value}`).join(""));
+}
+
+export async function canonicalFcmHash(request: FcmSendRequest): Promise<string> {
+  const tokenHash = await sha256(request.token);
+  const values = [
+    "fcm",
+    request.mode,
+    request.server_device_id,
+    request.delivery_id,
     request.collapse_id ?? "",
     tokenHash,
   ];
