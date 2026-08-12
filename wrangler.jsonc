@@ -114,8 +114,8 @@
       "preview_urls": false,
       "routes": [
         {
-          "pattern": "push.dev.siloserver.org/*",
-          "zone_name": "siloserver.org"
+          "pattern": "push.dev.siloserver.org",
+          "custom_domain": true
         }
       ],
       "vars": {
