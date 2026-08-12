@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "silo-push-relay",
+  "account_id": "087bdbc485f1086c01a96d826055c206",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-10",
   "workers_dev": false,
@@ -18,7 +19,7 @@
   "vars": {
     "CAPABILITY_ISSUER": "https://push.siloserver.org",
     "CAPABILITY_AUDIENCE": "silo-push-relay",
-    "CAPABILITY_SIGNING_KEY_ID": "v1",
+    "CAPABILITY_SIGNING_KEY_ID": "v2",
     "CAPABILITY_TTL_SECONDS": "2592000",
     "CAPABILITY_RENEW_GRACE_SECONDS": "604800",
     "APNS_TOPICS": "org.siloserver.silo",
@@ -105,5 +106,109 @@
       "tag": "v1",
       "new_sqlite_classes": ["DeploymentObject", "ProviderTokenObject"]
     }
-  ]
+  ],
+  "env": {
+    "development": {
+      "name": "silo-push-relay-development",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [
+        {
+          "pattern": "push.dev.siloserver.org/*",
+          "zone_name": "siloserver.org"
+        }
+      ],
+      "vars": {
+        "CAPABILITY_ISSUER": "https://push.dev.siloserver.org",
+        "CAPABILITY_AUDIENCE": "silo-push-relay",
+        "CAPABILITY_SIGNING_KEY_ID": "v2",
+        "CAPABILITY_TTL_SECONDS": "2592000",
+        "CAPABILITY_RENEW_GRACE_SECONDS": "604800",
+        "APNS_TOPICS": "org.siloserver.silo",
+        "APNS_PRODUCTION_URL": "https://api.push.apple.com",
+        "APNS_SANDBOX_URL": "https://api.sandbox.push.apple.com",
+        "APNS_EXPIRATION_SECONDS": "900",
+        "APNS_TIMEOUT_MS": "10000",
+        "FCM_PROJECT_ID": "siloandroid-a60b9",
+        "FCM_SEND_URL": "https://fcm.googleapis.com",
+        "FCM_TOKEN_URL": "https://oauth2.googleapis.com/token",
+        "FCM_TTL_SECONDS": "900",
+        "FCM_TIMEOUT_MS": "10000",
+        "IDEMPOTENCY_DISPATCH_TIMEOUT_SECONDS": "60",
+        "IDEMPOTENCY_RETENTION_SECONDS": "86400"
+      },
+      "ratelimits": [
+        {
+          "name": "INGRESS_RATE_LIMITER",
+          "namespace_id": "3375688658",
+          "simple": {
+            "limit": 2000,
+            "period": 10
+          }
+        },
+        {
+          "name": "REGISTRATION_IP_RATE_LIMITER",
+          "namespace_id": "3372244772",
+          "simple": {
+            "limit": 10,
+            "period": 60
+          }
+        },
+        {
+          "name": "REGISTRATION_LOCATION_RATE_LIMITER",
+          "namespace_id": "3339464169",
+          "simple": {
+            "limit": 100,
+            "period": 60
+          }
+        },
+        {
+          "name": "DEPLOYMENT_RATE_LIMITER",
+          "namespace_id": "2890095847",
+          "simple": {
+            "limit": 1000,
+            "period": 10
+          }
+        },
+        {
+          "name": "DEVICE_RATE_LIMITER",
+          "namespace_id": "2368630688",
+          "simple": {
+            "limit": 30,
+            "period": 60
+          }
+        }
+      ],
+      "secrets": {
+        "required": [
+          "CAPABILITY_SIGNING_PRIVATE_KEY_PEM",
+          "CAPABILITY_VERIFY_KEYS_JSON",
+          "APNS_TEAM_ID",
+          "APNS_KEY_ID",
+          "APNS_PRIVATE_KEY_PEM",
+          "FCM_CLIENT_EMAIL",
+          "FCM_PRIVATE_KEY_PEM",
+          "ADMIN_TOKEN"
+        ]
+      },
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "DEPLOYMENTS",
+            "class_name": "DeploymentObject"
+          },
+          {
+            "name": "PROVIDER_TOKENS",
+            "class_name": "ProviderTokenObject"
+          }
+        ]
+      },
+      "migrations": [
+        {
+          "tag": "v1",
+          "new_sqlite_classes": ["DeploymentObject", "ProviderTokenObject"]
+        }
+      ]
+    }
+  }
 }

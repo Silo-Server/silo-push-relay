@@ -113,7 +113,7 @@ describe("relay worker", () => {
     const registration = await register();
     expect(registration.deployment_id).toMatch(/^[0-9a-f-]{36}$/u);
     expect(registration.api_key.split(".")).toHaveLength(3);
-    expect(registration.key_prefix).toMatch(/^cap_v1_/u);
+    expect(registration.key_prefix).toMatch(/^cap_v2_/u);
     expect(registration.apns_topics).toEqual(["org.siloserver.silo"]);
     expect(Date.parse(registration.expires_at)).toBeGreaterThan(Date.now());
 
