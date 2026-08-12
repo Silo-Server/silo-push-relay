@@ -108,7 +108,7 @@ export default defineConfig({
       miniflare: {
         bindings: {
           CAPABILITY_SIGNING_PRIVATE_KEY_PEM: capabilityPrivateKey,
-          CAPABILITY_VERIFY_KEYS_JSON: JSON.stringify({ v1: capabilityPublicKey }),
+          CAPABILITY_VERIFY_KEYS_JSON: JSON.stringify({ v2: capabilityPublicKey }),
           APNS_TEAM_ID: "TESTTEAM01",
           APNS_KEY_ID: "TESTKEY001",
           APNS_PRIVATE_KEY_PEM: apnsPrivateKey,

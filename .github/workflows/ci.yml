@@ -2,9 +2,9 @@ name: CI and deploy
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, production]
   push:
-    branches: [main]
+    branches: [main, production]
   workflow_dispatch:
 
 permissions:
@@ -35,14 +35,14 @@ jobs:
       - run: pnpm exec wrangler deploy --dry-run
 
   deploy:
-    name: Deploy production
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    name: Deploy ${{ github.ref_name == 'production' && 'production' || 'development' }}
+    if: github.event_name != 'pull_request'
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
-      name: production
-      url: https://push.siloserver.org
+      name: ${{ github.ref_name == 'production' && 'production' || 'development' }}
+      url: ${{ github.ref_name == 'production' && 'https://push.siloserver.org' || 'https://push.dev.siloserver.org' }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - uses: pnpm/action-setup@b0f76dfb45f55f8421693e4803ac7bb65143bd34 # v6
@@ -61,6 +61,12 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           packageManager: pnpm
           wranglerVersion: 4.110.0
-          command: deploy
-      - name: Verify production health
-        run: curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 https://push.siloserver.org/healthz
+          command: ${{ github.ref_name == 'production' && 'deploy' || 'deploy --env development' }}
+      - name: Verify deployment health
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == "production" ]]; then
+            url="https://push.siloserver.org/healthz"
+          else
+            url="https://push.dev.siloserver.org/healthz"
+          fi
+          curl --fail --silent --show-error --retry 5 --retry-all-errors --retry-delay 2 "$url"

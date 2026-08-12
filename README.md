@@ -38,6 +38,11 @@ central server or database becoming a bottleneck. Cloudflare also provides
 automatic DDoS protection, while application-level rate limits add safeguards
 for registrations, deployments, and individual devices.
 
+The deployment is pinned to the dedicated Silo Server Cloudflare account in
+`wrangler.jsonc`. GitHub Actions must use an account-scoped API token for that
+same account; a mismatched account ID fails deployment instead of publishing
+the relay into a personal Cloudflare account.
+
 The relay's signing keys and APNs and FCM credentials are stored as encrypted
 Worker secrets, separate from the source code and deployment configuration. The
 serverless design also means there is no public origin server, operating system,
