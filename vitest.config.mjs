@@ -76,7 +76,7 @@ async function handleFcmRequest(request, url) {
     !token ||
     message.notification !== undefined ||
     dataKeys.join(",") !== "silo_delivery_id,silo_mode" ||
-    !["HIGH", "NORMAL"].includes(message?.android?.priority) ||
+    !["high", "normal"].includes(message?.android?.priority) ||
     Object.keys(body).some((field) => field !== "message")
   ) {
     return fcmError(400, "INVALID_ARGUMENT", "INVALID_ARGUMENT");

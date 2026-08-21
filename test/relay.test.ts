@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { sendToAPNs } from "../src/apns";
 import { canonicalAppleHash, newCapabilityClaims, signCapability } from "../src/crypto";
+import { sendToFCM } from "../src/fcm";
 import type { AppleSendRequest, FcmSendRequest } from "../src/types";
 
 const ACCEPT_TOKEN = "a".repeat(64);
@@ -886,6 +887,36 @@ describe("relay worker", () => {
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining(registration.deployment_id));
     logSpy.mockRestore();
     expect((await send(registration.api_key, crypto.randomUUID(), appleRequest())).status).toBe(401);
+  });
+
+  it("encodes FCM android.priority as lowercase HTTP v1 values", async () => {
+    const cases: Array<[FcmSendRequest["mode"], string]> = [
+      ["private_alert", "high"],
+      ["background_wake", "normal"],
+    ];
+    for (const [mode, priority] of cases) {
+      const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(
+        new Response(JSON.stringify({ name: "projects/siloandroid-a60b9/messages/priority-check" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      try {
+        const delivery = await sendToFCM(
+          env,
+          { ...fcmRequest(), mode },
+          { token: "test-google-access-token-1", issuedAt: Math.floor(Date.now() / 1000) },
+        );
+        expect(delivery.result).toEqual({ kind: "accepted", messageId: "priority-check" });
+        const [, init] = fetchSpy.mock.calls[0] as [string, RequestInit];
+        const body = JSON.parse(String(init.body)) as {
+          message: { android: { priority: string } };
+        };
+        expect(body.message.android.priority).toBe(priority);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    }
   });
 
   it("delivers FCM messages once and replays the stored response", async () => {
