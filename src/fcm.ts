@@ -119,7 +119,10 @@ function prepareFCMRequest(
       silo_mode: request.mode,
     },
     android: {
-      priority: request.mode === "background_wake" ? "NORMAL" : "HIGH",
+      // HTTP v1 JSON uses lowercase enum encodings ("high"/"normal"). Uppercase
+      // HIGH/NORMAL is rejected as INVALID_ARGUMENT and would be stored as a
+      // terminal failure, so every Android delivery would never be retried.
+      priority: request.mode === "background_wake" ? "normal" : "high",
       ttl: `${ttl}s`,
       ...(request.collapse_id ? { collapse_key: request.collapse_id } : {}),
     },
