@@ -18,3 +18,7 @@ key.json
 .codex/
 .DS_Store
 bin/
+
+# Local agent/tooling state
+/.agents/
+/.claude/

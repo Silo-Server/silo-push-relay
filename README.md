@@ -84,3 +84,17 @@ to, and does not use relay traffic for advertising, profiling, or analytics.
 APNs and FCM necessarily receive the device token and fixed generic payload in
 order to deliver the push; Cloudflare processes relay traffic at the network
 edge where the service runs.
+
+## Development
+
+Use Node.js 22 and pnpm 10:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm run check
+pnpm test
+pnpm exec wrangler deploy --dry-run
+```
+
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request. Production
+deployment is intentionally separate from the validation commands above.

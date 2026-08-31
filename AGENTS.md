@@ -22,9 +22,31 @@ Use strict TypeScript and ES modules. Match the existing style: two-space indent
 
 Tests use Vitest with `@cloudflare/vitest-pool-workers`; name files `*.test.ts` under `test/`. Add regression coverage for changes to routes, validation, APNs response mapping, quotas, idempotency, or Durable Object alarms. Tests run sequentially because fixtures share Worker and Durable Object state. There is no numeric coverage threshold, but new behavior and failure modes should be exercised.
 
-## Commit & Pull Request Guidelines
+## Writing
 
-Recent commits use short, imperative subjects such as `Optimize Durable Object cleanup scheduling`; scoped prefixes such as `fix:` are also accepted. Keep each commit focused. Pull requests should explain the behavior change, privacy or delivery risks, configuration impact, and commands run. Link relevant issues when available. For this API-only project, include request/response examples instead of screenshots.
+Before submitting human-facing prose, make a final readability pass. Lead with
+the outcome, use concrete plain language and active voice, and cut filler, stock
+framing, repetition, and promotional claims. Preserve the original meaning,
+evidence, citations, uncertainty, and terminology. Never rewrite exact quotes,
+commands, logs, identifiers, API names, or contractual language. Match the
+audience and use formatting only when it improves readability.
+
+## Pull requests
+
+- Never create a pull request unless the developer explicitly asks you to do so.
+- Use a Conventional Commit title in plain language. Keep one concern per pull
+  request; if the description needs “also,” split it.
+- Start the body with the problem, then explain the solution. Include privacy or
+  delivery risks, configuration impact, commands run, and representative
+  request/response examples. Link the relevant issue when one exists.
+- End with the required AI disclosure, including the exact model and
+  harness/tooling that did the work.
+- Upload review evidence to GitHub. Never commit pull-request-only screenshots,
+  recordings, or assets such as `.github/pr-assets/`.
+- When babysitting a pull request, poll checks and comments newer than the last
+  push. Verify every bot finding against the source, fix real findings, and
+  dismiss false positives with a written reason. Stay quiet when nothing is new
+  and stop when the latest commit is green.
 
 ## Security & Configuration Tips
 
