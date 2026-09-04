@@ -16,6 +16,7 @@ const fcmKeys = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const fcmPrivateKey = fcmKeys.privateKey.export({ format: "pem", type: "pkcs8" }).toString();
 
 const attempts = new Map();
+const rejectedCredentials = new Map();
 
 function fcmError(status, googleStatus, errorCode) {
   return new Response(
@@ -90,8 +91,12 @@ async function handleFcmRequest(request, url) {
   if (token === "D".repeat(140)) {
     return fcmError(403, "PERMISSION_DENIED", "SENDER_ID_MISMATCH");
   }
-  if (token === "E".repeat(140) && count === 1) {
-    return fcmError(401, "UNAUTHENTICATED");
+  if (token === "E".repeat(140)) {
+    const credential = request.headers.get("authorization");
+    if (count === 1) rejectedCredentials.set(token, credential);
+    if (credential === rejectedCredentials.get(token)) {
+      return fcmError(401, "UNAUTHENTICATED");
+    }
   }
   return new Response(
     JSON.stringify({
@@ -162,11 +167,15 @@ export default defineConfig({
               headers: { "apns-id": "configuration-apns-id" },
             });
           }
-          if (token === "e".repeat(64) && count === 1) {
-            return new Response(JSON.stringify({ reason: "ExpiredProviderToken" }), {
-              status: 403,
-              headers: { "apns-id": "expired-provider-token-apns-id" },
-            });
+          if (token === "e".repeat(64)) {
+            const credential = request.headers.get("authorization");
+            if (count === 1) rejectedCredentials.set(token, credential);
+            if (credential === rejectedCredentials.get(token)) {
+              return new Response(JSON.stringify({ reason: "ExpiredProviderToken" }), {
+                status: 403,
+                headers: { "apns-id": "expired-provider-token-apns-id" },
+              });
+            }
           }
           return new Response("", {
             status: 200,

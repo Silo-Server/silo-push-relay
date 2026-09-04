@@ -195,8 +195,10 @@ export async function sha256(value: string): Promise<string> {
   return base64url(await crypto.subtle.digest("SHA-256", encoder.encode(value)));
 }
 
-export async function canonicalAppleHash(request: AppleSendRequest): Promise<string> {
-  const tokenHash = await sha256(request.token);
+export async function canonicalAppleHash(
+  request: AppleSendRequest,
+  tokenHash: string,
+): Promise<string> {
   const values = [
     "apple",
     request.environment,
@@ -211,8 +213,10 @@ export async function canonicalAppleHash(request: AppleSendRequest): Promise<str
   return sha256(values.map((value) => `${value.length}:${value}`).join(""));
 }
 
-export async function canonicalFcmHash(request: FcmSendRequest): Promise<string> {
-  const tokenHash = await sha256(request.token);
+export async function canonicalFcmHash(
+  request: FcmSendRequest,
+  tokenHash: string,
+): Promise<string> {
   const values = [
     "fcm",
     request.mode,

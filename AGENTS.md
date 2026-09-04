@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is the production Cloudflare Worker behind `push.siloserver.org`. Code lives in `src/`: `index.ts` defines routes, `deployment-object.ts` owns per-deployment state and quotas, and `provider-token-object.ts` signs APNs provider tokens and mints Google OAuth access tokens for FCM. Supporting logic is split across `apns.ts`, `fcm.ts`, `crypto.ts`, and `validation.ts`. Worker configuration and Durable Object migrations are in `wrangler.jsonc`. Integration tests and fixtures live in `test/` and `vitest.config.mjs`. The retired Go service remains on `legacy/go-relay`.
+This is the production Cloudflare Worker behind `push.siloserver.org`. Code lives in `src/`: `index.ts` defines routes, `deployment-object.ts` owns per-deployment rotation, revocation, and idempotency, and `provider-token-object.ts` signs APNs provider tokens and mints Google OAuth access tokens for FCM. Supporting logic is split across `apns.ts`, `fcm.ts`, `crypto.ts`, and `validation.ts`. Worker configuration and Durable Object migrations are in `wrangler.jsonc`. Integration tests and fixtures live in `test/` and `vitest.config.mjs`. The retired Go service remains on `legacy/go-relay`.
 
 ## Architecture
 
@@ -36,7 +36,7 @@ Use strict TypeScript and ES modules. Match the existing style: two-space indent
 
 ## Testing Guidelines
 
-Tests use Vitest with `@cloudflare/vitest-pool-workers`; name files `*.test.ts` under `test/`. Add regression coverage for changes to routes, validation, APNs response mapping, quotas, idempotency, or Durable Object alarms. Tests run sequentially because fixtures share Worker and Durable Object state. There is no numeric coverage threshold, but new behavior and failure modes should be exercised.
+Tests use Vitest with `@cloudflare/vitest-pool-workers`; name files `*.test.ts` under `test/`. Add regression coverage for changes to routes, validation, APNs response mapping, rate limits, idempotency, or Durable Object alarms. Tests run sequentially because fixtures share Worker and Durable Object state. There is no numeric coverage threshold, but new behavior and failure modes should be exercised.
 
 ## Writing
 
@@ -74,5 +74,5 @@ audience and use formatting only when it improves readability.
   resend.
 - Never commit `.dev.vars`, `.env*`, PEM or `.p8` keys, APNs keys, Cloudflare
   credentials, or provider secrets. Runtime secrets live in Cloudflare; CI gets
-  only the narrowly scoped deployment token and account ID through the GitHub
-  environment.
+  only the narrowly scoped deployment token and account ID through the
+  branch-selected GitHub `development` or `production` environment.

@@ -238,10 +238,8 @@ async function handleAppleSend(request: Request, env: Env, requestId: string): P
     );
   }
 
-  const [payloadHash, tokenHash] = await Promise.all([
-    canonicalAppleHash(appleRequest),
-    sha256(appleRequest.token),
-  ]);
+  const tokenHash = await sha256(appleRequest.token);
+  const payloadHash = await canonicalAppleHash(appleRequest, tokenHash);
   const deviceLimited = await enforceRateLimit({
     limiter: env.DEVICE_RATE_LIMITER,
     key: `${claims.sub}:${tokenHash}`,
@@ -285,10 +283,8 @@ async function handleFcmSend(request: Request, env: Env, requestId: string): Pro
   // No topic allowlist: the relay only holds credentials for its own Firebase
   // project, so the project itself is the delivery boundary.
 
-  const [payloadHash, tokenHash] = await Promise.all([
-    canonicalFcmHash(fcmRequest),
-    sha256(fcmRequest.token),
-  ]);
+  const tokenHash = await sha256(fcmRequest.token);
+  const payloadHash = await canonicalFcmHash(fcmRequest, tokenHash);
   const deviceLimited = await enforceRateLimit({
     limiter: env.DEVICE_RATE_LIMITER,
     key: `${claims.sub}:${tokenHash}`,
