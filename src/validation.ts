@@ -142,7 +142,7 @@ function normalizeCollapseId(
     );
   }
   const normalized = collapseId.trim();
-  if (!normalized || encoderLength(normalized) > 64 || !PRINTABLE_ASCII.test(normalized)) {
+  if (!normalized || normalized.length > 64 || !PRINTABLE_ASCII.test(normalized)) {
     return errorResponse(
       400,
       "invalid_collapse_id",
@@ -151,8 +151,4 @@ function normalizeCollapseId(
     );
   }
   return normalized;
-}
-
-function encoderLength(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
 }
