@@ -1,6 +1,7 @@
 import { parseRetryAfter } from "./apns";
 import type { Env } from "./env";
 import { numberSetting } from "./env";
+import { fetchWithTimeout } from "./fetch-with-timeout";
 import type { ProviderToken } from "./provider-token-object";
 import type { FcmSendRequest, ProviderSendResult } from "./types";
 
@@ -33,14 +34,12 @@ export async function sendToFCM(
     return { result: { kind: "internal", reason: "request_construction_failed" } };
   }
 
-  let response: Response;
+  let raw: RawFCMResult;
   try {
-    response = await fetch(prepared.url, prepared.init);
+    raw = await fetchWithTimeout(prepared.url, prepared.init, prepared.timeoutMs, readFCMResponse);
   } catch {
     return { result: { kind: "unknown", reason: "network_error" } };
   }
-
-  const raw = await readFCMResponse(response);
 
   if (raw.status >= 200 && raw.status < 300) {
     return { result: { kind: "accepted", messageId: raw.messageId } };
@@ -99,6 +98,7 @@ export async function sendToFCM(
 interface PreparedFCMRequest {
   url: string;
   init: RequestInit;
+  timeoutMs: number;
 }
 
 function prepareFCMRequest(
@@ -126,6 +126,7 @@ function prepareFCMRequest(
   };
   return {
     url,
+    timeoutMs: timeout,
     init: {
       method: "POST",
       headers: {
@@ -133,7 +134,6 @@ function prepareFCMRequest(
         "content-type": "application/json",
       },
       body: JSON.stringify({ message }),
-      signal: AbortSignal.timeout(timeout),
     },
   };
 }

@@ -1,5 +1,6 @@
 import type { Env } from "./env";
 import { numberSetting } from "./env";
+import { fetchWithTimeout } from "./fetch-with-timeout";
 import type { ProviderToken } from "./provider-token-object";
 import type { AppleSendRequest, ProviderSendResult } from "./types";
 
@@ -35,14 +36,12 @@ export async function sendToAPNs(
     return { result: { kind: "internal", reason: "request_construction_failed" } };
   }
 
-  let response: Response;
+  let raw: RawAPNsResult;
   try {
-    response = await fetch(prepared.url, prepared.init);
+    raw = await fetchWithTimeout(prepared.url, prepared.init, prepared.timeoutMs, readAPNsResponse);
   } catch {
     return { result: { kind: "unknown", reason: "network_error" } };
   }
-
-  const raw = await readAPNsResponse(response);
 
   if (raw.status >= 200 && raw.status < 300) {
     return { result: { kind: "accepted", messageId: raw.apnsId } };
@@ -101,6 +100,7 @@ export async function sendToAPNs(
 interface PreparedAPNsRequest {
   url: string;
   init: RequestInit;
+  timeoutMs: number;
 }
 
 function prepareAPNsRequest(
@@ -128,11 +128,11 @@ function prepareAPNsRequest(
   const url = new URL(`/3/device/${request.token}`, `${origin.replace(/\/$/u, "")}/`).toString();
   return {
     url,
+    timeoutMs: timeout,
     init: {
       method: "POST",
       headers,
       body,
-      signal: AbortSignal.timeout(timeout),
     },
   };
 }

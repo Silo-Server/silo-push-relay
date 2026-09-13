@@ -3,6 +3,7 @@ import { DurableObject } from "cloudflare:workers";
 import { base64url } from "./crypto";
 import type { Env } from "./env";
 import { numberSetting } from "./env";
+import { fetchWithTimeout } from "./fetch-with-timeout";
 
 const REFRESH_AFTER_SECONDS = 50 * 60;
 const GOOGLE_OAUTH_SCOPE = "https://www.googleapis.com/auth/firebase.messaging";
@@ -25,6 +26,7 @@ interface StoredProviderToken {
 // token. Both cache under the same singleton row and refresh window.
 export class ProviderTokenObject extends DurableObject<Env> {
   private cached?: ProviderToken;
+  private refreshing?: Promise<ProviderToken>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -42,6 +44,7 @@ export class ProviderTokenObject extends DurableObject<Env> {
     if (this.cached && now - this.cached.issuedAt < REFRESH_AFTER_SECONDS) {
       return this.cached;
     }
+    if (this.refreshing) return this.refreshing;
 
     const stored = this.ctx.storage.sql
       .exec<StoredProviderToken>("SELECT token, issued_at FROM provider_token WHERE singleton = 1")
@@ -51,6 +54,17 @@ export class ProviderTokenObject extends DurableObject<Env> {
       return this.cached;
     }
 
+    // External I/O lets other calls enter this object while a refresh is pending.
+    // Share that work across callers, and allow another attempt after a failure.
+    this.refreshing = this.refreshToken(now);
+    try {
+      return await this.refreshing;
+    } finally {
+      this.refreshing = undefined;
+    }
+  }
+
+  private async refreshToken(now: number): Promise<ProviderToken> {
     const token =
       this.ctx.id.name === "fcm"
         ? await mintFcmAccessToken(this.env, now)
@@ -120,20 +134,26 @@ async function mintFcmAccessToken(env: Env, issuedAt: number): Promise<string> {
   );
   const assertion = `${unsigned}.${base64url(signature)}`;
 
-  const response = await fetch(env.FCM_TOKEN_URL, {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ grant_type: GOOGLE_JWT_GRANT, assertion }).toString(),
-    signal: AbortSignal.timeout(numberSetting(env.FCM_TIMEOUT_MS, "FCM_TIMEOUT_MS", 1)),
-  });
-  if (!response.ok) {
-    throw new Error(`google_token_exchange_failed_${response.status}`);
-  }
-  const parsed = (await response.json()) as { access_token?: unknown };
-  if (typeof parsed.access_token !== "string" || parsed.access_token.length === 0) {
-    throw new Error("google_token_exchange_malformed");
-  }
-  return parsed.access_token;
+  return fetchWithTimeout(
+    env.FCM_TOKEN_URL,
+    {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: GOOGLE_JWT_GRANT, assertion }).toString(),
+    },
+    numberSetting(env.FCM_TIMEOUT_MS, "FCM_TIMEOUT_MS", 1),
+    async (response) => {
+      if (!response.ok) {
+        await response.body?.cancel();
+        throw new Error(`google_token_exchange_failed_${response.status}`);
+      }
+      const parsed = (await response.json()) as { access_token?: unknown };
+      if (typeof parsed.access_token !== "string" || parsed.access_token.length === 0) {
+        throw new Error("google_token_exchange_malformed");
+      }
+      return parsed.access_token;
+    },
+  );
 }
 
 function pemBytes(pem: string, name: string): Uint8Array {
