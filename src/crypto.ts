@@ -15,6 +15,7 @@ let signingKeyCache:
   | { pem: string; key: Promise<CryptoKey> }
   | undefined;
 const verificationKeyCache = new Map<string, { pem: string; key: Promise<CryptoKey> }>();
+let verificationKeyConfig: { json: string; keys: Record<string, unknown> } | undefined;
 
 export class CapabilityError extends Error {
   constructor(
@@ -71,13 +72,23 @@ async function capabilityPrivateKey(env: Env): Promise<CryptoKey> {
 }
 
 async function capabilityPublicKey(env: Env, keyId: string): Promise<CryptoKey> {
-  let keys: Record<string, unknown>;
-  try {
-    keys = JSON.parse(env.CAPABILITY_VERIFY_KEYS_JSON) as Record<string, unknown>;
-  } catch {
-    throw new CapabilityError("unauthorized", "invalid verification key configuration");
+  if (verificationKeyConfig?.json !== env.CAPABILITY_VERIFY_KEYS_JSON) {
+    let keys: unknown;
+    try {
+      keys = JSON.parse(env.CAPABILITY_VERIFY_KEYS_JSON);
+    } catch {
+      throw new CapabilityError("unauthorized", "invalid verification key configuration");
+    }
+    if (keys === null || typeof keys !== "object" || Array.isArray(keys)) {
+      throw new CapabilityError("unauthorized", "invalid verification key configuration");
+    }
+    verificationKeyCache.clear();
+    verificationKeyConfig = {
+      json: env.CAPABILITY_VERIFY_KEYS_JSON,
+      keys: keys as Record<string, unknown>,
+    };
   }
-  const pem = keys[keyId];
+  const pem = verificationKeyConfig.keys[keyId];
   if (typeof pem !== "string") throw new CapabilityError("unauthorized", "unknown key id");
   const cached = verificationKeyCache.get(keyId);
   if (cached?.pem === pem) return cached.key;

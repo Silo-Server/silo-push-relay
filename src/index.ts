@@ -225,7 +225,6 @@ async function handleAppleSend(request: Request, env: Env, requestId: string): P
   }
 
   const tokenHash = await sha256(appleRequest.token);
-  const payloadHash = await canonicalAppleHash(appleRequest, tokenHash);
   const deviceLimited = await enforceRateLimit({
     limiter: env.DEVICE_RATE_LIMITER,
     key: `${claims.sub}:${tokenHash}`,
@@ -237,6 +236,7 @@ async function handleAppleSend(request: Request, env: Env, requestId: string): P
     deploymentId: claims.sub,
   });
   if (deviceLimited) return deviceLimited;
+  const payloadHash = await canonicalAppleHash(appleRequest, tokenHash);
   const result = await env.DEPLOYMENTS.getByName(claims.sub).send({
     provider: "apple",
     generation: claims.ver,
@@ -270,7 +270,6 @@ async function handleFcmSend(request: Request, env: Env, requestId: string): Pro
   // project, so the project itself is the delivery boundary.
 
   const tokenHash = await sha256(fcmRequest.token);
-  const payloadHash = await canonicalFcmHash(fcmRequest, tokenHash);
   const deviceLimited = await enforceRateLimit({
     limiter: env.DEVICE_RATE_LIMITER,
     key: `${claims.sub}:${tokenHash}`,
@@ -282,6 +281,7 @@ async function handleFcmSend(request: Request, env: Env, requestId: string): Pro
     deploymentId: claims.sub,
   });
   if (deviceLimited) return deviceLimited;
+  const payloadHash = await canonicalFcmHash(fcmRequest, tokenHash);
   const result = await env.DEPLOYMENTS.getByName(claims.sub).send({
     provider: "fcm",
     generation: claims.ver,
