@@ -26,26 +26,10 @@ export async function enforceRateLimit(check: RateLimitCheck): Promise<Response 
   try {
     const { success } = await check.limiter.limit({ key: check.key });
     if (success) return undefined;
-  } catch (error) {
-    console.error(
-      JSON.stringify({
-        event: "rate_limit.check_failed",
-        kind: check.kind,
-        request_id: check.requestId,
-        error: error instanceof Error ? error.name : "unknown_error",
-      }),
-    );
+  } catch {
     return undefined;
   }
 
-  console.warn(
-    JSON.stringify({
-      event: "rate_limit.denied",
-      kind: check.kind,
-      request_id: check.requestId,
-      ...(check.deploymentId ? { deployment_id: check.deploymentId } : {}),
-    }),
-  );
   return errorResponse(429, check.code, check.message, check.requestId, {
     "retry-after": String(check.retryAfterSeconds),
   });

@@ -560,14 +560,7 @@ export class DeploymentObject extends DurableObject<Env> {
     const target = this.cleanupAlarmTarget(expiresAt);
     if (this.cleanupAlarmAt !== undefined && this.cleanupAlarmAt <= target) return;
     this.ctx.waitUntil(
-      this.setCleanupAlarmAt(expiresAt).catch((error: unknown) => {
-        console.error(
-          JSON.stringify({
-            event: "cleanup.alarm_schedule_failed",
-            error: error instanceof Error ? error.name : "unknown_error",
-          }),
-        );
-      }),
+      this.setCleanupAlarmAt(expiresAt).catch(() => {}),
     );
   }
 
