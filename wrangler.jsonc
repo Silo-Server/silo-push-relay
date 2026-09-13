@@ -13,8 +13,7 @@
     }
   ],
   "observability": {
-    "enabled": true,
-    "head_sampling_rate": 1
+    "enabled": false
   },
   "vars": {
     "CAPABILITY_ISSUER": "https://push.siloserver.org",

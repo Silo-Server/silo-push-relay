@@ -76,14 +76,7 @@ export default {
         return handleFcmSend(request, env, requestId);
       }
       return errorResponse(404, "not_found", "not found", requestId);
-    } catch (error) {
-      console.error(
-        JSON.stringify({
-          event: "request.failed",
-          request_id: requestId,
-          error: error instanceof Error ? error.name : "unknown_error",
-        }),
-      );
+    } catch {
       return errorResponse(500, "internal_error", "internal server error", requestId);
     }
   },
@@ -203,13 +196,6 @@ async function handleAdminRevoke(request: Request, env: Env, requestId: string):
     return errorResponse(400, "invalid_field", "deployment_id must be 1-128 characters", requestId);
   }
   await env.DEPLOYMENTS.getByName(deploymentId).disable();
-  console.log(
-    JSON.stringify({
-      event: "deployment.admin_revoked",
-      request_id: requestId,
-      deployment_id: deploymentId,
-    }),
-  );
   return jsonResponse(200, { request_id: requestId, deployment_id: deploymentId, status: "revoked" });
 }
 

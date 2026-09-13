@@ -22,3 +22,4 @@ bin/
 # Local agent/tooling state
 /.agents/
 /.claude/
+google-services.json

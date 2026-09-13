@@ -1044,7 +1044,6 @@ describe("relay worker", () => {
     });
     expect(rejected.status).toBe(401);
 
-    const logSpy = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const revoked = await SELF.fetch("https://relay.test/v1/admin/deployments/revoke", {
       method: "POST",
       headers: {
@@ -1054,9 +1053,6 @@ describe("relay worker", () => {
       body: JSON.stringify({ deployment_id: registration.deployment_id }),
     });
     expect(revoked.status).toBe(200);
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("deployment.admin_revoked"));
-    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining(registration.deployment_id));
-    logSpy.mockRestore();
     expect((await send(registration.api_key, crypto.randomUUID(), appleRequest())).status).toBe(401);
   });
 
