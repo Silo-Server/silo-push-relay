@@ -87,9 +87,9 @@ tokens or notification content.
 The relay does not have Silo user accounts, does not know who a device belongs
 to, and does not use relay traffic for advertising, profiling, or analytics.
 APNs and FCM necessarily receive the device token and the fixed generic
-payload, including its delivery, server, and profile IDs, in order to deliver
-the push; Cloudflare processes relay traffic at the network edge where the
-service runs.
+payload, including its delivery ID and any server and profile IDs the server
+supplied, in order to deliver the push; Cloudflare processes relay traffic at
+the network edge where the service runs.
 
 ## Development
 

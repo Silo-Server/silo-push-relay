@@ -3,6 +3,7 @@ import type { AppleSendRequest, FcmSendRequest, PushTarget } from "./types";
 
 const APNS_TOKEN = /^[0-9a-fA-F]{64,200}$/u;
 const FCM_TOKEN = /^[A-Za-z0-9_:-]{64,512}$/u;
+const LONE_SURROGATE = /\p{Cs}/u;
 const PRINTABLE_ASCII = /^[\u0020-\u007e]+$/u;
 const APPLE_FIELDS = new Set([
   "token",
@@ -143,7 +144,9 @@ function validatePushTarget(object: Record<string, unknown>, requestId: string):
   for (const field of ["server_id", "profile_id"] as const) {
     const value = object[field];
     if (value === undefined) continue;
-    if (typeof value !== "string" || value.length === 0 || value.length > 128) {
+    // A lone surrogate would hash as U+FFFD, so two different IDs could share an
+    // idempotency hash.
+    if (typeof value !== "string" || value.length === 0 || value.length > 128 || LONE_SURROGATE.test(value)) {
       return errorResponse(400, "invalid_field", "opaque IDs must be 1-128 characters", requestId);
     }
     target[field] = value;

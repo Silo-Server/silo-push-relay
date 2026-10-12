@@ -267,12 +267,15 @@ describe("relay worker", () => {
         { profile_id: "p".repeat(129) },
         { server_id: 7 },
         { profile_id: null },
+        { server_id: "\uD800" },
+        { profile_id: "profile\uDC00" },
       ]) {
         const response = await submit(fields);
         expect(response.status).toBe(400);
         expect((await response.json<ErrorEnvelope>()).error.code).toBe("invalid_field");
       }
       expect((await submit({ server_id: "s", profile_id: "p".repeat(128) })).status).toBe(200);
+      expect((await submit({ server_id: "server-\u{1F600}", profile_id: "p" })).status).toBe(200);
     },
   );
 
