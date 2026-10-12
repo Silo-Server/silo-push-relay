@@ -10,7 +10,16 @@ export interface CapabilityClaims {
   scope: string[];
 }
 
-export interface AppleSendRequest {
+// Opaque IDs of the Silo Server deployment and profile a push belongs to. A
+// device signed into several servers or profiles uses them to fetch the
+// delivery from the right one. The relay forwards them unverified, so they
+// select a stored target on the device and authorize nothing.
+export interface PushTarget {
+  server_id?: string;
+  profile_id?: string;
+}
+
+export interface AppleSendRequest extends PushTarget {
   token: string;
   environment: "production" | "sandbox";
   topic: string;
@@ -21,7 +30,7 @@ export interface AppleSendRequest {
   collapse_id?: string;
 }
 
-export interface FcmSendRequest {
+export interface FcmSendRequest extends PushTarget {
   token: string;
   mode: "private_alert" | "background_wake";
   server_device_id: string;

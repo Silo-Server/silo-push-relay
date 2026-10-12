@@ -172,6 +172,8 @@ function buildPayload(request: AppleSendRequest): {
     aps,
     silo_delivery_id: request.delivery_id,
   };
+  if (request.server_id !== undefined) payload.silo_server_id = request.server_id;
+  if (request.profile_id !== undefined) payload.silo_profile_id = request.profile_id;
   if (request.mode === "background_wake") {
     return { body: JSON.stringify(payload), pushType: "background", priority: "5" };
   }

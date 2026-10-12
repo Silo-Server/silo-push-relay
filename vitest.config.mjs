@@ -17,6 +17,9 @@ const fcmPrivateKey = fcmKeys.privateKey.export({ format: "pem", type: "pkcs8" }
 
 const attempts = new Map();
 const rejectedCredentials = new Map();
+const PUSH_TARGET_FIELDS = ["silo_server_id", "silo_profile_id"];
+const APNS_PAYLOAD_FIELDS = ["aps", "silo_delivery_id", ...PUSH_TARGET_FIELDS];
+const FCM_DATA_FIELDS = ["silo_delivery_id", "silo_mode", ...PUSH_TARGET_FIELDS];
 
 function fcmError(status, googleStatus, errorCode) {
   return new Response(
@@ -72,11 +75,13 @@ async function handleFcmRequest(request, url) {
   const count = (attempts.get(token) ?? 0) + 1;
   attempts.set(token, count);
 
-  const dataKeys = Object.keys(message?.data ?? {}).sort();
+  const data = message?.data ?? {};
   if (
     !token ||
     message.notification !== undefined ||
-    dataKeys.join(",") !== "silo_delivery_id,silo_mode" ||
+    !data.silo_delivery_id ||
+    !data.silo_mode ||
+    Object.keys(data).some((field) => !FCM_DATA_FIELDS.includes(field)) ||
     !["HIGH", "NORMAL"].includes(message?.android?.priority) ||
     Object.keys(body).some((field) => field !== "message")
   ) {
@@ -145,7 +150,7 @@ export default defineConfig({
             typeof payload !== "object" ||
             !payload.aps ||
             !payload.silo_delivery_id ||
-            Object.keys(payload).some((field) => !["aps", "silo_delivery_id"].includes(field))
+            Object.keys(payload).some((field) => !APNS_PAYLOAD_FIELDS.includes(field))
           ) {
             return new Response(JSON.stringify({ reason: "BadPayload" }), { status: 400 });
           }

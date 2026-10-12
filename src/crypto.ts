@@ -1,5 +1,5 @@
 import { numberSetting, type Env } from "./env";
-import type { AppleSendRequest, CapabilityClaims, FcmSendRequest } from "./types";
+import type { AppleSendRequest, CapabilityClaims, FcmSendRequest, PushTarget } from "./types";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -220,6 +220,7 @@ export async function canonicalAppleHash(
     request.badge === undefined ? "" : String(request.badge),
     request.collapse_id ?? "",
     tokenHash,
+    ...pushTargetValues(request),
   ];
   return sha256(values.map((value) => `${value.length}:${value}`).join(""));
 }
@@ -235,8 +236,19 @@ export async function canonicalFcmHash(
     request.delivery_id,
     request.collapse_id ?? "",
     tokenHash,
+    ...pushTargetValues(request),
   ];
   return sha256(values.map((value) => `${value.length}:${value}`).join(""));
+}
+
+// Present fields are appended with their names so the two cannot be confused.
+// Absent fields add nothing, which keeps hashes of requests without a push
+// target equal to idempotency records written before these fields existed.
+function pushTargetValues(target: PushTarget): string[] {
+  const values: string[] = [];
+  if (target.server_id !== undefined) values.push(`server_id=${target.server_id}`);
+  if (target.profile_id !== undefined) values.push(`profile_id=${target.profile_id}`);
+  return values;
 }
 
 export async function constantTimeSecretEqual(left: string, right: string): Promise<boolean> {

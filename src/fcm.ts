@@ -111,12 +111,15 @@ function prepareFCMRequest(
   const ttl = numberSetting(env.FCM_TTL_SECONDS, "FCM_TTL_SECONDS", 1);
   const timeout = numberSetting(env.FCM_TIMEOUT_MS, "FCM_TIMEOUT_MS", 1);
   // Fixed content-private payload: a data-only message so Android never shows a
-  // relay-authored notification. The app fetches real content by delivery ID.
+  // relay-authored notification. The app fetches real content by delivery ID
+  // from the server and profile the push names.
   const message: Record<string, unknown> = {
     token: request.token,
     data: {
       silo_delivery_id: request.delivery_id,
       silo_mode: request.mode,
+      ...(request.server_id === undefined ? {} : { silo_server_id: request.server_id }),
+      ...(request.profile_id === undefined ? {} : { silo_profile_id: request.profile_id }),
     },
     android: {
       priority: request.mode === "background_wake" ? "NORMAL" : "HIGH",
