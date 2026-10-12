@@ -12,7 +12,8 @@ export interface CapabilityClaims {
 
 // Opaque IDs of the Silo Server deployment and profile a push belongs to. A
 // device signed into several servers or profiles uses them to fetch the
-// delivery from the right one.
+// delivery from the right one. The relay forwards them unverified, so they
+// select a stored target on the device and authorize nothing.
 export interface PushTarget {
   server_id?: string;
   profile_id?: string;
