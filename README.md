@@ -22,8 +22,10 @@ your devices.
    devices or Firebase Cloud Messaging (FCM) for Android devices.
 4. APNs delivers either a generic **New notification available** alert or a
    background wake; FCM delivers a data-only wake that the Android app turns
-   into a local notification. The actual notification content is never sent
-   through the relay.
+   into a local notification. The push carries only opaque IDs: the delivery
+   ID and, when the server sends them, the server and profile IDs. The app
+   uses these to fetch the actual content from the right Silo Server and
+   profile. Notification content is never sent through the relay.
 
 Delivery requests are idempotent. This allows a Silo Server to retry safely
 without intentionally sending the same push more than once, including when an
@@ -61,7 +63,10 @@ To deliver a push, the relay briefly processes:
 - an opaque deployment ID and signed capability;
 - the APNs device token, environment, and app topic, or the FCM registration
   token;
-- opaque device and delivery IDs; and
+- opaque device and delivery IDs;
+- an optional server ID, the public identifier of the Silo Server
+  deployment, and an optional opaque profile ID, which together tell the app
+  where to fetch the notification; and
 - the delivery mode and optional badge or collapse identifier.
 
 The device token and raw delivery request are used only while handling the
@@ -81,9 +86,10 @@ tokens or notification content.
 
 The relay does not have Silo user accounts, does not know who a device belongs
 to, and does not use relay traffic for advertising, profiling, or analytics.
-APNs and FCM necessarily receive the device token and fixed generic payload in
-order to deliver the push; Cloudflare processes relay traffic at the network
-edge where the service runs.
+APNs and FCM necessarily receive the device token and the fixed generic
+payload, including its delivery, server, and profile IDs, in order to deliver
+the push; Cloudflare processes relay traffic at the network edge where the
+service runs.
 
 ## Development
 

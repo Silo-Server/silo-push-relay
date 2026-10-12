@@ -1,5 +1,5 @@
 import { errorResponse } from "./http";
-import type { AppleSendRequest, FcmSendRequest } from "./types";
+import type { AppleSendRequest, FcmSendRequest, PushTarget } from "./types";
 
 const APNS_TOKEN = /^[0-9a-fA-F]{64,200}$/u;
 const FCM_TOKEN = /^[A-Za-z0-9_:-]{64,512}$/u;
@@ -13,6 +13,8 @@ const APPLE_FIELDS = new Set([
   "delivery_id",
   "badge",
   "collapse_id",
+  "server_id",
+  "profile_id",
 ]);
 const FCM_FIELDS = new Set([
   "token",
@@ -20,6 +22,8 @@ const FCM_FIELDS = new Set([
   "server_device_id",
   "delivery_id",
   "collapse_id",
+  "server_id",
+  "profile_id",
 ]);
 
 export { APPLE_FIELDS, FCM_FIELDS };
@@ -74,6 +78,8 @@ export function validateAppleRequest(
   }
   const normalizedCollapseId = normalizeCollapseId(object.collapse_id, requestId);
   if (normalizedCollapseId instanceof Response) return normalizedCollapseId;
+  const target = validatePushTarget(object, requestId);
+  if (target instanceof Response) return target;
 
   return {
     token,
@@ -84,6 +90,7 @@ export function validateAppleRequest(
     delivery_id: deliveryId,
     ...(badge === undefined ? {} : { badge: badge as number }),
     ...(normalizedCollapseId === undefined ? {} : { collapse_id: normalizedCollapseId }),
+    ...target,
   };
 }
 
@@ -118,6 +125,8 @@ export function validateFcmRequest(
 
   const normalizedCollapseId = normalizeCollapseId(object.collapse_id, requestId);
   if (normalizedCollapseId instanceof Response) return normalizedCollapseId;
+  const target = validatePushTarget(object, requestId);
+  if (target instanceof Response) return target;
 
   return {
     token,
@@ -125,7 +134,21 @@ export function validateFcmRequest(
     server_device_id: serverDeviceId,
     delivery_id: deliveryId,
     ...(normalizedCollapseId === undefined ? {} : { collapse_id: normalizedCollapseId }),
+    ...target,
   };
+}
+
+function validatePushTarget(object: Record<string, unknown>, requestId: string): PushTarget | Response {
+  const target: PushTarget = {};
+  for (const field of ["server_id", "profile_id"] as const) {
+    const value = object[field];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || value.length === 0 || value.length > 128) {
+      return errorResponse(400, "invalid_field", "opaque IDs must be 1-128 characters", requestId);
+    }
+    target[field] = value;
+  }
+  return target;
 }
 
 function normalizeCollapseId(

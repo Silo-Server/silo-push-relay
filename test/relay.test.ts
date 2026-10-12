@@ -9,7 +9,8 @@ import {
   sha256,
   signCapability,
 } from "../src/crypto";
-import type { AppleSendRequest, FcmSendRequest } from "../src/types";
+import { sendToFCM } from "../src/fcm";
+import type { AppleSendRequest, FcmSendRequest, PushTarget } from "../src/types";
 
 const ACCEPT_TOKEN = "a".repeat(64);
 const TERMINAL_TOKEN = "b".repeat(64);
@@ -70,7 +71,7 @@ async function register(
 async function send(
   capability: string,
   idempotencyKey: string,
-  body: AppleSendRequest,
+  body: unknown,
 ): Promise<Response> {
   return SELF.fetch("https://relay.test/v1/apple/send", {
     method: "POST",
@@ -108,6 +109,22 @@ async function sendFcm(
     body: JSON.stringify(body),
   });
 }
+
+const PUSH_TARGET_CASES = (["background_wake", "private_alert"] as const).flatMap((mode) => [
+  { mode, label: "without a push target", target: {}, forwarded: {} },
+  {
+    mode,
+    label: "with a push target",
+    target: { server_id: "server:1", profile_id: "profile:1" },
+    forwarded: { silo_server_id: "server:1", silo_profile_id: "profile:1" },
+  },
+  {
+    mode,
+    label: "with only a profile ID",
+    target: { profile_id: "profile:1" },
+    forwarded: { silo_profile_id: "profile:1" },
+  },
+]);
 
 describe("relay worker", () => {
   it("reports health and readiness", async () => {
@@ -237,6 +254,28 @@ describe("relay worker", () => {
     ).toBe(200);
   });
 
+  it.each(["apple", "fcm"] as const)(
+    "validates optional server and profile IDs on %s sends",
+    async (provider) => {
+      const registration = await register();
+      const sendTo = provider === "apple" ? send : sendFcm;
+      const base = provider === "apple" ? appleRequest() : fcmRequest();
+      const submit = (fields: Record<string, unknown>) =>
+        sendTo(registration.api_key, crypto.randomUUID(), { ...base, ...fields });
+      for (const fields of [
+        { server_id: "" },
+        { profile_id: "p".repeat(129) },
+        { server_id: 7 },
+        { profile_id: null },
+      ]) {
+        const response = await submit(fields);
+        expect(response.status).toBe(400);
+        expect((await response.json<ErrorEnvelope>()).error.code).toBe("invalid_field");
+      }
+      expect((await submit({ server_id: "s", profile_id: "p".repeat(128) })).status).toBe(200);
+    },
+  );
+
   it("rejects topics outside the relay allowlist", async () => {
     const registration = await register();
     const response = await send(registration.api_key, crypto.randomUUID(), {
@@ -247,10 +286,10 @@ describe("relay worker", () => {
     expect((await response.json<ErrorEnvelope>()).error.code).toBe("topic_not_allowed");
   });
 
-  it.each(["background_wake", "private_alert"] as const)(
-    "builds the fixed content-private %s payload",
-    async (mode) => {
-      const body = { ...appleRequest(), mode, badge: 0 };
+  it.each(PUSH_TARGET_CASES)(
+    "builds the fixed content-private $mode payload $label",
+    async ({ mode, target, forwarded }) => {
+      const body = { ...appleRequest(), mode, badge: 0, ...target };
       const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValueOnce(new Response(""));
       try {
         const delivery = await sendToAPNs(env, body, {
@@ -274,6 +313,34 @@ describe("relay worker", () => {
                 sound: "default",
               },
           silo_delivery_id: body.delivery_id,
+          ...forwarded,
+        });
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    },
+  );
+
+  it.each(PUSH_TARGET_CASES)(
+    "builds the data-only $mode FCM message $label",
+    async ({ mode, target, forwarded }) => {
+      const body = { ...fcmRequest(), mode, ...target };
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(Response.json({ name: "projects/test/messages/accepted" }));
+      try {
+        const delivery = await sendToFCM(env, body, {
+          token: "test-provider-token",
+          issuedAt: Math.floor(Date.now() / 1000),
+        });
+        expect(delivery.result.kind).toBe("accepted");
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+        const { message } = JSON.parse(String(fetchSpy.mock.calls[0]?.[1]?.body));
+        expect(message.notification).toBeUndefined();
+        expect(message.data).toEqual({
+          silo_delivery_id: body.delivery_id,
+          silo_mode: mode,
+          ...forwarded,
         });
       } finally {
         fetchSpy.mockRestore();
@@ -291,6 +358,37 @@ describe("relay worker", () => {
       "idempotency_key_reuse",
     );
   });
+
+  it.each(["apple", "fcm"] as const)(
+    "rejects a %s retry that names a different push target",
+    async (provider) => {
+      const registration = await register();
+      const sendTo = provider === "apple" ? send : sendFcm;
+      const base = provider === "apple" ? appleRequest() : fcmRequest();
+      const submit = (key: string, target: PushTarget) =>
+        sendTo(registration.api_key, key, { ...base, ...target });
+      const pairs: [PushTarget, PushTarget][] = [
+        [
+          { server_id: "server:1", profile_id: "profile:1" },
+          { server_id: "server:1", profile_id: "profile:2" },
+        ],
+        [
+          { server_id: "server:1", profile_id: "profile:1" },
+          { server_id: "server:2", profile_id: "profile:1" },
+        ],
+        [{}, { server_id: "server:1", profile_id: "profile:1" }],
+        [{ server_id: "shared" }, { profile_id: "shared" }],
+      ];
+      for (const [first, retry] of pairs) {
+        const key = crypto.randomUUID();
+        expect((await submit(key, first)).status).toBe(200);
+        expect((await submit(key, first)).status).toBe(200);
+        const reuse = await submit(key, retry);
+        expect(reuse.status).toBe(422);
+        expect((await reuse.json<ErrorEnvelope>()).error.code).toBe("idempotency_key_reuse");
+      }
+    },
+  );
 
   it("preserves canonical hashes used by existing idempotency records", async () => {
     const apple: AppleSendRequest = {
@@ -324,6 +422,14 @@ describe("relay worker", () => {
     );
     expect(await canonicalFcmHash({ ...fcm, collapse_id: "collapse:1" }, fcmTokenHash)).toBe(
       "igxdqamXFVJHIQ_NQz2Vi8Ie3QVXw8bmPRnCuF0Zn-8",
+    );
+    // Captured when server and profile IDs joined the encoding.
+    const target = { server_id: "server:1", profile_id: "profile:1" };
+    expect(await canonicalAppleHash({ ...apple, ...target }, appleTokenHash)).toBe(
+      "4nzVQSqeBg20sBHoGhWQDCHu_3W8V98qovxIg_Q3Ppg",
+    );
+    expect(await canonicalFcmHash({ ...fcm, ...target }, fcmTokenHash)).toBe(
+      "0BG5o9eYZwgIBsOfSkwYTCiw5MJB-xT6Q9MIZwZ-_Wg",
     );
   });
 
